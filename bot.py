@@ -24,6 +24,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 from dotenv import load_dotenv
 
 from sheets import append_application
@@ -274,8 +276,39 @@ async def main() -> None:
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    log.info("Бот стартует, админов: %s", len(ADMIN_IDS))
-    await dp.start_polling(bot)
+
+    # Render автоматически выставляет RENDER_EXTERNAL_URL для web services.
+    # Если переменной нет (локально) — падаем в polling.
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not base_url:
+        log.info("Локальный режим: long polling, админов: %s", len(ADMIN_IDS))
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+        return
+
+    webhook_path = "/webhook"
+    webhook_url = f"{base_url}{webhook_path}"
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "ugc-leasing-secret")
+
+    await bot.set_webhook(
+        webhook_url, secret_token=webhook_secret, drop_pending_updates=True
+    )
+    log.info("Webhook установлен: %s, админов: %s", webhook_url, len(ADMIN_IDS))
+
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=webhook_secret).register(
+        app, path=webhook_path
+    )
+    # Health-check для Render — без него free web service считается «непросыпающимся»
+    app.router.add_get("/", lambda r: web.Response(text="OK"))
+    setup_application(app, dp, bot=bot)
+
+    port = int(os.getenv("PORT", "10000"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
