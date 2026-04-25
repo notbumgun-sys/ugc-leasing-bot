@@ -70,12 +70,35 @@ URL_RE = re.compile(r"https?://\S+")
 
 BTN_RESTART = "🔄 Начать заново"
 BTN_CANCEL = "❌ Отмена"
+BTN_BACK = "↩️ Назад"
+BTN_CONTACT = "📱 Отправить мой контакт"
+
+
+def _ctrl_row() -> list[KeyboardButton]:
+    return [KeyboardButton(text=BTN_RESTART), KeyboardButton(text=BTN_CANCEL)]
 
 
 def kb() -> ReplyKeyboardMarkup:
-    """Клавиатура с кнопками управления — висит на каждом шаге."""
+    """Клавиатура для первого шага — назад некуда."""
+    return ReplyKeyboardMarkup(keyboard=[_ctrl_row()], resize_keyboard=True)
+
+
+def kb_with_back() -> ReplyKeyboardMarkup:
+    """Шаги 2 и 3 — добавляется кнопка «Назад» к предыдущему вопросу."""
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_RESTART), KeyboardButton(text=BTN_CANCEL)]],
+        keyboard=[[KeyboardButton(text=BTN_BACK)], _ctrl_row()],
+        resize_keyboard=True,
+    )
+
+
+def kb_contact() -> ReplyKeyboardMarkup:
+    """Шаг 3 — добавляется кнопка отправки контакта из Telegram."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_CONTACT, request_contact=True)],
+            [KeyboardButton(text=BTN_BACK)],
+            _ctrl_row(),
+        ],
         resize_keyboard=True,
     )
 
@@ -111,6 +134,11 @@ THANKS = (
 
 CANCELED = "Ок, отменил. Если захочешь заполнить — просто нажми /start"
 
+ASK_EXAMPLES_AGAIN = (
+    "Окей, вернулся к <b>Шагу 1 из 3</b>. Пришли ссылки на 2–3 примера "
+    "своих работ одним сообщением (YouTube, VK Video, Rutube, Telegram, Instagram)."
+)
+
 # --- Роутер -----------------------------------------------------------------
 
 router = Router()
@@ -138,6 +166,21 @@ async def cmd_restart(m: Message, state: FSMContext):
     await cmd_start(m, state)
 
 
+@router.message(F.text == BTN_BACK)
+async def cmd_back(m: Message, state: FSMContext):
+    cur = await state.get_state()
+    if cur == Form.experience.state:
+        await state.set_state(Form.examples)
+        await m.answer(ASK_EXAMPLES_AGAIN, reply_markup=kb())
+    elif cur == Form.contact.state:
+        await state.set_state(Form.experience)
+        await m.answer(ASK_EXPERIENCE, reply_markup=kb_with_back())
+    else:
+        await m.answer(
+            "Это первый шаг — назад некуда. Пришли ссылки 👇", reply_markup=kb()
+        )
+
+
 def _validate_text(m: Message) -> str | None:
     """Вернуть текст ошибки или None если всё ок."""
     if not m.text:
@@ -162,26 +205,35 @@ async def got_examples(m: Message, state: FSMContext):
         return
     await state.update_data(examples=m.text.strip())
     await state.set_state(Form.experience)
-    await m.answer(ASK_EXPERIENCE, reply_markup=kb())
+    await m.answer(ASK_EXPERIENCE, reply_markup=kb_with_back())
 
 
 @router.message(Form.experience)
 async def got_experience(m: Message, state: FSMContext):
     err = _validate_text(m)
     if err:
-        await m.answer(err, reply_markup=kb())
+        await m.answer(err, reply_markup=kb_with_back())
         return
     await state.update_data(experience=m.text.strip())
     await state.set_state(Form.contact)
-    await m.answer(ASK_CONTACT, reply_markup=kb())
+    await m.answer(ASK_CONTACT, reply_markup=kb_contact())
 
 
 @router.message(Form.contact)
 async def got_contact(m: Message, state: FSMContext, bot: Bot):
-    err = _validate_text(m)
-    if err:
-        await m.answer(err, reply_markup=kb())
-        return
+    if m.contact:
+        first = (m.contact.first_name or "").strip()
+        last = (m.contact.last_name or "").strip()
+        phone = m.contact.phone_number or ""
+        contact_text = f"{first} {last}".strip()
+        if phone:
+            contact_text = (contact_text + f", тел.: {phone}").strip(", ").strip()
+    else:
+        err = _validate_text(m)
+        if err:
+            await m.answer(err, reply_markup=kb_contact())
+            return
+        contact_text = m.text.strip()
 
     # Антиспам: не чаще одной заявки в 10 минут от одного юзера
     now = time.time()
@@ -201,7 +253,7 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
         "tg_username": m.from_user.username or "",
         "examples": data.get("examples", ""),
         "experience": data.get("experience", ""),
-        "contact": m.text.strip(),
+        "contact": contact_text,
     }
 
     try:
