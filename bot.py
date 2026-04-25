@@ -34,7 +34,7 @@ os.environ.setdefault("GOOGLE_CREDS_FILE", str(ENV_DIR / "credentials.json"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-SPAM_COOLDOWN_SEC = 600   # повторная заявка от одного юзера — раз в 10 минут
+SPAM_COOLDOWN_SEC = int(os.getenv("SPAM_COOLDOWN_SEC", "30"))  # дефолт: 30 сек между submit'ами
 MAX_TEXT_LEN = 4000       # лимит длины одного сообщения от юзера
 
 # --- Логирование ------------------------------------------------------------
@@ -122,9 +122,10 @@ WELCOME = (
     "Цены ниже рынка на <b>15–25%</b>, много уникальных вариантов, которых нет на Авито.\n\n"
     "Ищем <b>мужчин-автоэнтузиастов</b> для съёмки коротких видео. "
     "Заполни короткую анкету — это 2 минуты.\n\n"
-    "<b>Шаг 1 из 4.</b> Пришли <b>ссылки</b> на 2–3 примера своих работ — "
-    "YouTube, TikTok, Reels, VK Video, Rutube, Telegram, Instagram, "
-    "Snapchat, Facebook или любая другая соцсеть. Одним сообщением, без вложений."
+    "<b>Шаг 1 из 4.</b> Пришли <b>ссылки</b> на свои соцсети или конкретные видео — "
+    "TikTok, YouTube, Reels, Shorts, Instagram, Telegram-канал, "
+    "VK Video, Rutube, Snapchat, Facebook или любая другая платформа. "
+    "Одним сообщением."
 )
 
 ASK_EXPERIENCE = (
@@ -147,9 +148,9 @@ THANKS = (
 CANCELED = "Ок, отменил. Если захочешь заполнить — просто нажми /start"
 
 ASK_EXAMPLES_AGAIN = (
-    "Окей, вернулся к <b>Шагу 1 из 4</b>. Пришли ссылки на 2–3 примера "
-    "работ одним сообщением — YouTube, TikTok, Reels, Telegram, Instagram "
-    "или любая другая соцсеть."
+    "Окей, вернулся к <b>Шагу 1 из 4</b>. Пришли ссылки — на свои соцсети "
+    "или конкретные видео (TikTok, YouTube, Reels, Instagram, Telegram, "
+    "VK или любая платформа)."
 )
 
 
@@ -232,9 +233,9 @@ async def got_examples(m: Message, state: FSMContext):
         return
     if not URL_RE.search(m.text):
         await m.answer(
-            "Не нашёл ссылку — пришли хотя бы один URL своих работ. "
-            "Подойдёт YouTube, TikTok, Reels, Telegram, Instagram или любая "
-            "другая соцсеть, главное чтобы была ссылка.",
+            "Не нашёл ссылку — пришли URL на свою соцсеть или конкретное "
+            "видео (TikTok, YouTube, Reels, Instagram, Telegram или любая "
+            "другая платформа).",
             reply_markup=kb(),
         )
         return
@@ -299,8 +300,8 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
     if now - last < SPAM_COOLDOWN_SEC:
         await state.clear()
         await m.answer(
-            "Мы уже получили твою заявку совсем недавно. "
-            "Напиши чуть позже, если хочешь дополнить.",
+            "⏳ Заявка от тебя только что отправлена. "
+            "Если хочешь оставить ещё одну — попробуй через минуту.",
             reply_markup=kb(),
         )
         return
