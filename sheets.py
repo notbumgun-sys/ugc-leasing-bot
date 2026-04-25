@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 
@@ -17,18 +18,26 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _ws = None  # кэш worksheet между вызовами
 
 
+def _load_credentials() -> Credentials:
+    # Приоритет: GOOGLE_CREDS_JSON (для Render — кладём JSON в env var,
+    # потому что Render API не даёт надёжно заливать Secret Files).
+    raw = os.getenv("GOOGLE_CREDS_JSON")
+    if raw:
+        return Credentials.from_service_account_info(json.loads(raw), scopes=_SCOPES)
+    creds_file = os.getenv("GOOGLE_CREDS_FILE", "credentials.json")
+    return Credentials.from_service_account_file(creds_file, scopes=_SCOPES)
+
+
 def _get_ws():
     global _ws
     if _ws is not None:
         return _ws
 
     sheet_id = os.getenv("SHEET_ID", "")
-    creds_file = os.getenv("GOOGLE_CREDS_FILE", "credentials.json")
     if not sheet_id:
-        raise RuntimeError("SHEET_ID не задан в env/.env")
+        raise RuntimeError("SHEET_ID не задан")
 
-    creds = Credentials.from_service_account_file(creds_file, scopes=_SCOPES)
-    gc = gspread.authorize(creds)
+    gc = gspread.authorize(_load_credentials())
     sh = gc.open_by_key(sheet_id)
 
     try:
