@@ -13,7 +13,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 WORKSHEET_NAME = "Applications"
-HEADERS = ["timestamp", "tg_id", "tg_username", "examples", "experience", "contact"]
+HEADERS = ["timestamp", "tg_id", "tg_username", "examples", "experience", "contact", "name"]
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _ws = None  # кэш worksheet между вызовами
 
@@ -46,6 +46,11 @@ def _get_ws():
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=len(HEADERS))
         ws.append_row(HEADERS)
 
+    # Авто-апгрейд шапки если в листе старая схема (например после добавления колонки)
+    actual = ws.row_values(1)
+    if actual != HEADERS:
+        ws.update("A1", [HEADERS])
+
     _ws = ws
     return ws
 
@@ -61,6 +66,7 @@ def append_application(data: dict) -> None:
             data.get("examples", ""),
             data.get("experience", ""),
             data.get("contact", ""),
+            data.get("name", ""),
         ],
         value_input_option="USER_ENTERED",
     )

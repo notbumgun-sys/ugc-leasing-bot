@@ -60,7 +60,9 @@ log = logging.getLogger("ugc-bot")
 class Form(StatesGroup):
     examples = State()
     experience = State()
+    name = State()
     contact = State()
+    confirm = State()
 
 
 # user_id -> timestamp последней принятой заявки (антиспам)
@@ -72,6 +74,7 @@ BTN_RESTART = "🔄 Начать заново"
 BTN_CANCEL = "❌ Отмена"
 BTN_BACK = "↩️ Назад"
 BTN_CONTACT = "📱 Отправить мой контакт"
+BTN_SUBMIT = "✅ Отправить"
 
 
 def _ctrl_row() -> list[KeyboardButton]:
@@ -92,10 +95,22 @@ def kb_with_back() -> ReplyKeyboardMarkup:
 
 
 def kb_contact() -> ReplyKeyboardMarkup:
-    """Шаг 3 — добавляется кнопка отправки контакта из Telegram."""
+    """Шаг 4 — добавляется кнопка отправки контакта из Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_CONTACT, request_contact=True)],
+            [KeyboardButton(text=BTN_BACK)],
+            _ctrl_row(),
+        ],
+        resize_keyboard=True,
+    )
+
+
+def kb_confirm() -> ReplyKeyboardMarkup:
+    """Финальный экран — отправить или назад."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SUBMIT)],
             [KeyboardButton(text=BTN_BACK)],
             _ctrl_row(),
         ],
@@ -112,19 +127,21 @@ WELCOME = (
     "Цены ниже рынка на <b>15–25%</b>, много уникальных вариантов, которых нет на Авито.\n\n"
     "Ищем <b>мужчин-автоэнтузиастов</b> для съёмки коротких видео. "
     "Заполни короткую анкету — это 2 минуты.\n\n"
-    "<b>Шаг 1 из 3.</b> Пришли <b>ссылки</b> на 2–3 примера своих работ "
+    "<b>Шаг 1 из 4.</b> Пришли <b>ссылки</b> на 2–3 примера своих работ "
     "(YouTube, VK Video, Rutube, Telegram, Instagram — любые). "
     "Одним сообщением. Только ссылки, без вложений."
 )
 
 ASK_EXPERIENCE = (
-    "<b>Шаг 2 из 3.</b> Коротко расскажи про опыт: "
+    "<b>Шаг 2 из 4.</b> Коротко расскажи про опыт: "
     "сколько снимаешь, какие темы ведёшь, какая техника. Одним сообщением."
 )
 
+ASK_NAME = "<b>Шаг 3 из 4.</b> Как тебя зовут? Имя одной строкой."
+
 ASK_CONTACT = (
-    "<b>Шаг 3 из 3.</b> Как с тобой связаться? "
-    "Оставь Telegram-ник (@username) или имя + любой удобный контакт."
+    "<b>Шаг 4 из 4.</b> Контакт для связи: оставь Telegram-ник (@username), "
+    "номер телефона или нажми кнопку <b>«📱 Отправить мой контакт»</b> ниже."
 )
 
 THANKS = (
@@ -135,9 +152,24 @@ THANKS = (
 CANCELED = "Ок, отменил. Если захочешь заполнить — просто нажми /start"
 
 ASK_EXAMPLES_AGAIN = (
-    "Окей, вернулся к <b>Шагу 1 из 3</b>. Пришли ссылки на 2–3 примера "
+    "Окей, вернулся к <b>Шагу 1 из 4</b>. Пришли ссылки на 2–3 примера "
     "своих работ одним сообщением (YouTube, VK Video, Rutube, Telegram, Instagram)."
 )
+
+
+def _build_summary(data: dict) -> str:
+    def short(s: str, n: int = 300) -> str:
+        s = s or ""
+        return s if len(s) <= n else s[:n] + "…"
+    return (
+        "<b>📋 Проверь заявку:</b>\n\n"
+        f"• <b>Имя:</b> {short(data.get('name',''), 80)}\n"
+        f"• <b>Контакт:</b> {short(data.get('contact',''), 100)}\n"
+        f"• <b>Примеры:</b> {short(data.get('examples',''))}\n"
+        f"• <b>Опыт:</b> {short(data.get('experience',''))}\n\n"
+        "Всё верно? Жми «✅ Отправить». Ошибся — «↩️ Назад» (можно вернуться "
+        "хоть к шагу 1)."
+    )
 
 # --- Роутер -----------------------------------------------------------------
 
@@ -172,9 +204,15 @@ async def cmd_back(m: Message, state: FSMContext):
     if cur == Form.experience.state:
         await state.set_state(Form.examples)
         await m.answer(ASK_EXAMPLES_AGAIN, reply_markup=kb())
-    elif cur == Form.contact.state:
+    elif cur == Form.name.state:
         await state.set_state(Form.experience)
         await m.answer(ASK_EXPERIENCE, reply_markup=kb_with_back())
+    elif cur == Form.contact.state:
+        await state.set_state(Form.name)
+        await m.answer(ASK_NAME, reply_markup=kb_with_back())
+    elif cur == Form.confirm.state:
+        await state.set_state(Form.contact)
+        await m.answer(ASK_CONTACT, reply_markup=kb_contact())
     else:
         await m.answer(
             "Это первый шаг — назад некуда. Пришли ссылки 👇", reply_markup=kb()
@@ -215,19 +253,26 @@ async def got_experience(m: Message, state: FSMContext):
         await m.answer(err, reply_markup=kb_with_back())
         return
     await state.update_data(experience=m.text.strip())
+    await state.set_state(Form.name)
+    await m.answer(ASK_NAME, reply_markup=kb_with_back())
+
+
+@router.message(Form.name)
+async def got_name(m: Message, state: FSMContext):
+    err = _validate_text(m)
+    if err:
+        await m.answer(err, reply_markup=kb_with_back())
+        return
+    await state.update_data(name=m.text.strip())
     await state.set_state(Form.contact)
     await m.answer(ASK_CONTACT, reply_markup=kb_contact())
 
 
 @router.message(Form.contact)
-async def got_contact(m: Message, state: FSMContext, bot: Bot):
+async def got_contact(m: Message, state: FSMContext):
     if m.contact:
-        first = (m.contact.first_name or "").strip()
-        last = (m.contact.last_name or "").strip()
         phone = m.contact.phone_number or ""
-        contact_text = f"{first} {last}".strip()
-        if phone:
-            contact_text = (contact_text + f", тел.: {phone}").strip(", ").strip()
+        contact_text = f"тел.: {phone}" if phone else ""
     else:
         err = _validate_text(m)
         if err:
@@ -235,7 +280,23 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
             return
         contact_text = m.text.strip()
 
-    # Антиспам: не чаще одной заявки в 10 минут от одного юзера
+    if not contact_text:
+        await m.answer("Не понял контакт — попробуй ещё раз.", reply_markup=kb_contact())
+        return
+
+    await state.update_data(contact=contact_text)
+    await state.set_state(Form.confirm)
+    data = await state.get_data()
+    await m.answer(_build_summary(data), reply_markup=kb_confirm())
+
+
+@router.message(F.text == BTN_SUBMIT)
+async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
+    cur = await state.get_state()
+    if cur != Form.confirm.state:
+        # Кнопку нажали не на сводке — игнорируем мягко
+        return
+
     now = time.time()
     last = _last_submission.get(m.from_user.id, 0)
     if now - last < SPAM_COOLDOWN_SEC:
@@ -253,7 +314,8 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
         "tg_username": m.from_user.username or "",
         "examples": data.get("examples", ""),
         "experience": data.get("experience", ""),
-        "contact": contact_text,
+        "contact": data.get("contact", ""),
+        "name": data.get("name", ""),
     }
 
     try:
@@ -272,8 +334,6 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
         await state.clear()
         return
 
-    # Cooldown ставим только после успешной записи —
-    # если Sheets упал, юзер сможет попробовать снова.
     _last_submission[m.from_user.id] = now
     await state.clear()
     await m.answer(THANKS, reply_markup=ReplyKeyboardRemove())
@@ -282,10 +342,20 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
     await _notify_admins(
         bot,
         "🆕 Новая заявка UGC\n\n"
+        f"Имя: {payload['name']}\n"
         f"TG: @{payload['tg_username'] or '—'} (id {payload['tg_id']})\n"
         f"Контакт: {payload['contact']}\n\n"
         f"Примеры:\n{payload['examples'][:500]}\n\n"
         f"Опыт:\n{payload['experience'][:500]}",
+    )
+
+
+@router.message(Form.confirm)
+async def confirm_fallback(m: Message, state: FSMContext):
+    """На сводке жмут кнопки. Любой текст — мягкое напоминание."""
+    await m.answer(
+        "Жми «✅ Отправить» чтобы отправить заявку или «↩️ Назад» чтобы поправить.",
+        reply_markup=kb_confirm(),
     )
 
 
