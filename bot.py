@@ -23,7 +23,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from dotenv import load_dotenv
 
-from sheets import append_application
+from sheets import append_application, append_event, read_events
 
 # --- Конфиг -----------------------------------------------------------------
 
@@ -33,7 +33,10 @@ load_dotenv(ENV_DIR / ".env")
 os.environ.setdefault("GOOGLE_CREDS_FILE", str(ENV_DIR / "credentials.json"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# ADMIN_IDS — куда уходят уведомления о новых заявках (обычно группа).
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+# OWNER_IDS — кто может вызвать /stats (личные tg_id владельцев).
+OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip()]
 SPAM_COOLDOWN_SEC = int(os.getenv("SPAM_COOLDOWN_SEC", "30"))  # дефолт: 30 сек между submit'ами
 MAX_TEXT_LEN = 4000       # лимит длины одного сообщения от юзера
 
@@ -154,6 +157,69 @@ ASK_EXAMPLES_AGAIN = (
 )
 
 
+_FUNNEL_STEPS = [
+    ("start", "🚀 Запустили /start"),
+    ("step_examples", "1️⃣ Прислали ссылки"),
+    ("step_experience", "2️⃣ Рассказали опыт"),
+    ("step_name", "3️⃣ Указали имя"),
+    ("step_contact", "4️⃣ Дали контакт"),
+    ("submitted", "✅ Отправили заявку"),
+]
+
+
+def _aggregate(events: list[dict], since_ts: str | None = None) -> dict[str, set[int]]:
+    """Возвращает {event: set(tg_id)} — множества уникальных юзеров на каждом шаге."""
+    out: dict[str, set[int]] = {ev: set() for ev, _ in _FUNNEL_STEPS}
+    out["cancelled"] = set()
+    for r in events:
+        ts = str(r.get("timestamp", ""))
+        if since_ts and ts < since_ts:
+            continue
+        ev = str(r.get("event", ""))
+        try:
+            uid = int(r.get("tg_id", 0))
+        except (TypeError, ValueError):
+            continue
+        if ev in out:
+            out[ev].add(uid)
+    return out
+
+
+def _format_funnel_block(title: str, agg: dict[str, set[int]]) -> str:
+    base = len(agg.get("start", set())) or 1  # чтобы не делить на 0
+    lines = [f"<b>{title}</b>"]
+    prev = None
+    for ev, label in _FUNNEL_STEPS:
+        n = len(agg.get(ev, set()))
+        pct_total = n / base * 100
+        if prev is None:
+            lines.append(f"{label}: <b>{n}</b>")
+        else:
+            step_pct = (n / prev * 100) if prev else 0
+            lines.append(f"{label}: <b>{n}</b>  ({pct_total:.0f}% всего, {step_pct:.0f}% шаг)")
+        prev = n
+    cancelled = len(agg.get("cancelled", set()))
+    if cancelled:
+        lines.append(f"❌ Отменили: <b>{cancelled}</b>")
+    return "\n".join(lines)
+
+
+def _format_stats(events: list[dict]) -> str:
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    since_24h = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+
+    agg_all = _aggregate(events)
+    agg_24h = _aggregate(events, since_ts=since_24h)
+
+    return (
+        f"📊 <b>Статистика бота</b>\n"
+        f"<i>Записей в Events: {len(events)}</i>\n\n"
+        f"{_format_funnel_block('За 24 часа', agg_24h)}\n\n"
+        f"{_format_funnel_block('За всё время (с момента трекинга)', agg_all)}"
+    )
+
+
 def _build_summary(data: dict) -> str:
     def short(s: str, n: int = 300) -> str:
         s = s or ""
@@ -179,17 +245,34 @@ router.message.filter(F.chat.type == "private")
 # Команды и кнопки управления — регистрируем ДО FSM-хэндлеров,
 # чтобы они срабатывали в любом состоянии.
 
+@router.message(Command("stats"))
+async def cmd_stats(m: Message):
+    if m.from_user.id not in OWNER_IDS:
+        return  # тихо игнорим — пусть выглядит как неизвестная команда
+    try:
+        events = await asyncio.to_thread(read_events)
+    except Exception as e:
+        log.exception("read_events failed")
+        await m.answer(f"Не смог прочитать Events: {e}")
+        return
+    text = _format_stats(events)
+    await m.answer(text)
+
+
 @router.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
     await state.clear()
     await state.set_state(Form.examples)
+    _track(m, "start")
     await m.answer(WELCOME, reply_markup=kb())
 
 
 @router.message(F.text == BTN_CANCEL)
 @router.message(Command("cancel"))
 async def cmd_cancel(m: Message, state: FSMContext):
+    cur = await state.get_state()
     await state.clear()
+    _track(m, "cancelled", extra=cur or "no_state")
     await m.answer(CANCELED, reply_markup=kb())
 
 
@@ -244,6 +327,7 @@ async def got_examples(m: Message, state: FSMContext):
         return
     await state.update_data(examples=m.text.strip())
     await state.set_state(Form.experience)
+    _track(m, "step_examples")
     await m.answer(ASK_EXPERIENCE, reply_markup=kb_with_back())
 
 
@@ -255,6 +339,7 @@ async def got_experience(m: Message, state: FSMContext):
         return
     await state.update_data(experience=m.text.strip())
     await state.set_state(Form.name)
+    _track(m, "step_experience")
     await m.answer(ASK_NAME, reply_markup=kb_with_back())
 
 
@@ -266,6 +351,7 @@ async def got_name(m: Message, state: FSMContext):
         return
     await state.update_data(name=m.text.strip())
     await state.set_state(Form.contact)
+    _track(m, "step_name")
     await m.answer(ASK_CONTACT, reply_markup=kb_contact())
 
 
@@ -288,6 +374,7 @@ async def got_contact(m: Message, state: FSMContext):
     await state.update_data(contact=contact_text)
     await state.set_state(Form.confirm)
     data = await state.get_data()
+    _track(m, "step_contact")
     await m.answer(_build_summary(data), reply_markup=kb_confirm())
 
 
@@ -337,6 +424,7 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
 
     _last_submission[m.from_user.id] = now
     await state.clear()
+    _track(m, "submitted")
     await m.answer(THANKS, reply_markup=kb())
 
     log.info("Новая заявка от @%s (id=%s)", payload["tg_username"], payload["tg_id"])
@@ -385,6 +473,21 @@ async def _notify_admins(bot: Bot, text: str) -> None:
             await bot.send_message(admin_id, text)
         except Exception:
             log.exception("Не смог отправить админу %s", admin_id)
+
+
+def _track(m: Message, event: str, extra: str = "") -> None:
+    """Пишет событие в Events sheet асинхронно (fire-and-forget).
+    Падение Sheets не должно ломать пользовательский flow."""
+    tg_id = m.from_user.id if m.from_user else 0
+    username = (m.from_user.username if m.from_user else "") or ""
+
+    async def _do():
+        try:
+            await asyncio.to_thread(append_event, tg_id, username, event, extra)
+        except Exception:
+            log.exception("track event failed: %s", event)
+
+    asyncio.create_task(_do())
 
 
 # --- Точка входа ------------------------------------------------------------

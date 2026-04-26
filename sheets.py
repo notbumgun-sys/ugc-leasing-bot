@@ -14,8 +14,13 @@ from google.oauth2.service_account import Credentials
 
 WORKSHEET_NAME = "Applications"
 HEADERS = ["timestamp", "tg_id", "tg_username", "examples", "experience", "contact", "name"]
+
+EVENTS_WS_NAME = "Events"
+EVENTS_HEADERS = ["timestamp", "tg_id", "tg_username", "event", "extra"]
+
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _ws = None  # кэш worksheet между вызовами
+_events_ws = None
 
 
 def _load_credentials() -> Credentials:
@@ -70,3 +75,44 @@ def append_application(data: dict) -> None:
         ],
         value_input_option="USER_ENTERED",
     )
+
+
+def _get_events_ws():
+    global _events_ws
+    if _events_ws is not None:
+        return _events_ws
+
+    sheet_id = os.getenv("SHEET_ID", "")
+    if not sheet_id:
+        raise RuntimeError("SHEET_ID не задан")
+
+    gc = gspread.authorize(_load_credentials())
+    sh = gc.open_by_key(sheet_id)
+
+    try:
+        ws = sh.worksheet(EVENTS_WS_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=EVENTS_WS_NAME, rows=10000, cols=len(EVENTS_HEADERS))
+        ws.append_row(EVENTS_HEADERS)
+
+    actual = ws.row_values(1)
+    if actual != EVENTS_HEADERS:
+        ws.update("A1", [EVENTS_HEADERS])
+
+    _events_ws = ws
+    return ws
+
+
+def append_event(tg_id: int | str, tg_username: str, event: str, extra: str = "") -> None:
+    ws = _get_events_ws()
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ws.append_row(
+        [ts, str(tg_id), tg_username or "", event, extra or ""],
+        value_input_option="RAW",
+    )
+
+
+def read_events() -> list[dict]:
+    """Все события из листа Events. Для агрегации в /stats."""
+    ws = _get_events_ws()
+    return ws.get_all_records()
