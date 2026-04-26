@@ -46,11 +46,19 @@ def _mk_msg(user, chat, text=None, contact=None):
 
 async def run() -> int:
     notif: list[str] = []
+    tracked: list[dict] = []
 
     async def fake_notify(bot, text):
         notif.append(text)
 
+    def fake_track(m, event, extra=""):
+        # Заменяет fire-and-forget _track — пишем в локальный список, не в Sheets
+        tg_id = m.from_user.id if m.from_user else 0
+        username = (m.from_user.username if m.from_user else "") or ""
+        tracked.append({"tg_id": tg_id, "username": username, "event": event, "extra": extra})
+
     bot_mod._notify_admins = fake_notify
+    bot_mod._track = fake_track
     fake_bot = MagicMock()
     fake_bot.send_message = AsyncMock()
 
@@ -205,6 +213,60 @@ async def run() -> int:
     print(f"  ✅ Без username попал tg_first_name={last[7]!r}, tg_last_name={last[8]!r}")
     ws.delete_rows(len(rows))
     print("  ✅ Финальная заявка содержит ОБНОВЛЁННЫЕ значения")
+
+    # --- Сценарий 4: трекинг невалидного ввода и back_pressed ---
+    print("\n--- Сценарий 4: трекаем невалидный ввод и кнопку «Назад» ---")
+    uid4 = 4
+    state4 = FSMContext(storage=storage, key=StorageKey(bot_id=0, chat_id=uid4, user_id=uid4))
+    user4 = MagicMock()
+    user4.id = uid4
+    user4.username = "invalid_tester"
+    user4.first_name = "Невалид"
+    user4.last_name = ""
+    chat4 = MagicMock(); chat4.id = uid4
+
+    # /start с deep-link параметром
+    await bot_mod.cmd_start(_mk_msg(user4, chat4, "/start fb_creative_3"), state4)
+
+    # Текст без URL → state остаётся
+    await bot_mod.got_examples(_mk_msg(user4, chat4, "просто текст, ссылок нет"), state4)
+    assert (await state4.get_state()) == bot_mod.Form.examples.state
+    print("  ✅ Текст без URL не двигает state")
+
+    # Валидный URL → перешли дальше
+    await bot_mod.got_examples(_mk_msg(user4, chat4, "https://t.me/x"), state4)
+    assert (await state4.get_state()) == bot_mod.Form.experience.state
+
+    # Назад на 1 шаг
+    await bot_mod.cmd_back(_mk_msg(user4, chat4, bot_mod.BTN_BACK), state4)
+    assert (await state4.get_state()) == bot_mod.Form.examples.state
+
+    # Сообщение вне FSM — fallback (state не None но нет совпадения)
+    state5 = FSMContext(storage=storage, key=StorageKey(bot_id=0, chat_id=999, user_id=999))
+    user5 = MagicMock()
+    user5.id = 999
+    user5.username = ""
+    user5.first_name = "Аноним"
+    user5.last_name = ""
+    chat5 = MagicMock(); chat5.id = 999
+    await bot_mod.fallback(_mk_msg(user5, chat5, "случайный текст"), state5)
+
+    # Проверяем трекинг
+    u4_events = [t["event"] for t in tracked if t["tg_id"] == uid4]
+    assert "start" in u4_events
+    assert "examples_invalid" in u4_events, f"got: {u4_events}"
+    assert "step_examples" in u4_events
+    assert "back_pressed" in u4_events
+    print(f"  ✅ Трекаются: {sorted(set(u4_events))}")
+
+    # deep-link param должен попасть в extra start-события
+    start_extras = [t["extra"] for t in tracked if t["tg_id"] == uid4 and t["event"] == "start"]
+    assert "fb_creative_3" in start_extras, f"start_extras={start_extras}"
+    print("  ✅ Deep-link параметр /start попадает в extra")
+
+    fallback_events = [t for t in tracked if t["tg_id"] == 999 and t["event"] == "fallback"]
+    assert fallback_events, "fallback должен трекаться"
+    print(f"  ✅ Сообщение вне FSM записывается как fallback ({len(fallback_events)} шт.)")
 
     print("\n" + "=" * 60)
     print("ALL SCENARIOS PASSED")
