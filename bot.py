@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import html
 import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -23,7 +26,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from dotenv import load_dotenv
 
-from sheets import append_application, append_event, read_events
+from sheets import append_application, append_event, read_applications, read_events
 
 # --- Конфиг -----------------------------------------------------------------
 
@@ -33,10 +36,13 @@ load_dotenv(ENV_DIR / ".env")
 os.environ.setdefault("GOOGLE_CREDS_FILE", str(ENV_DIR / "credentials.json"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "stockauto_ugc_bot")
 # ADMIN_IDS — куда уходят уведомления о новых заявках (обычно группа).
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 # OWNER_IDS — кто может вызвать /stats (личные tg_id владельцев).
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip()]
+# Токен для веб-админки /admin?token=...
+ADMIN_WEB_TOKEN = os.getenv("ADMIN_WEB_TOKEN", "")
 SPAM_COOLDOWN_SEC = int(os.getenv("SPAM_COOLDOWN_SEC", "30"))  # дефолт: 30 сек между submit'ами
 MAX_TEXT_LEN = 4000       # лимит длины одного сообщения от юзера
 
@@ -205,7 +211,6 @@ def _format_funnel_block(title: str, agg: dict[str, set[int]]) -> str:
 
 
 def _format_stats(events: list[dict]) -> str:
-    from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     since_24h = (now - timedelta(hours=24)).isoformat(timespec="seconds")
 
@@ -218,6 +223,106 @@ def _format_stats(events: list[dict]) -> str:
         f"{_format_funnel_block('За 24 часа', agg_24h)}\n\n"
         f"{_format_funnel_block('За всё время (с момента трекинга)', agg_all)}"
     )
+
+
+def _render_admin_html(events: list[dict], apps: list[dict]) -> str:
+    """Минимальная HTML-страница админки: воронка 24h+all, последние заявки,
+    кнопка открыть бота для ручного тестирования. Без JS."""
+    now = datetime.now(timezone.utc)
+    since_24h = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+    agg_24h = _aggregate(events, since_ts=since_24h)
+    agg_all = _aggregate(events)
+
+    def funnel_table(title: str, agg: dict[str, set[int]]) -> str:
+        base = len(agg.get("start", set())) or 1
+        rows_html = []
+        prev = None
+        for ev, label in _FUNNEL_STEPS:
+            n = len(agg.get(ev, set()))
+            pct_total = n / base * 100
+            if prev is None:
+                pct_html = ""
+            else:
+                step_pct = (n / prev * 100) if prev else 0
+                pct_html = f'<span class="pct">{pct_total:.0f}% всего · {step_pct:.0f}% шаг</span>'
+            rows_html.append(
+                f"<tr><td>{label}</td><td class='n'>{n}</td><td>{pct_html}</td></tr>"
+            )
+            prev = n
+        cancelled = len(agg.get("cancelled", set()))
+        return (
+            f"<h3>{html.escape(title)}</h3>"
+            f"<table class='funnel'>{''.join(rows_html)}</table>"
+            f"<p class='cancel'>❌ Отменили: <b>{cancelled}</b></p>"
+        )
+
+    apps_blocks = []
+    for a in list(apps)[-15:][::-1]:
+        ts = str(a.get("timestamp", ""))[:19].replace("T", " ")
+        name = html.escape(str(a.get("name", "") or "—"))
+        contact = html.escape(str(a.get("contact", "")))
+        username = html.escape(str(a.get("tg_username", "") or ""))
+        examples = html.escape(str(a.get("examples", "") or ""))[:300]
+        experience = html.escape(str(a.get("experience", "") or ""))[:200]
+        uname_html = f'<a href="https://t.me/{username}" target="_blank">@{username}</a>' if username else "—"
+        apps_blocks.append(
+            f"""<div class="app">
+                <div class="app-head"><b>{name}</b> · {contact} · {uname_html}</div>
+                <div class="ts">{ts} UTC</div>
+                <div class="ex">📎 {examples}</div>
+                <div class="ex">💬 {experience}</div>
+            </div>"""
+        )
+    apps_html = "\n".join(apps_blocks) or "<p><i>Заявок пока нет.</i></p>"
+
+    return f"""<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>UGC бот · админка</title>
+<style>
+  body {{ font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
+         max-width: 720px; margin: 24px auto; padding: 0 16px; color: #222; }}
+  h1 {{ font-size: 22px; margin: 0 0 4px; }}
+  h3 {{ margin: 24px 0 8px; }}
+  .sub {{ color: #777; font-size: 13px; margin-bottom: 20px; }}
+  .cta {{ display: inline-block; background: #0088cc; color: #fff;
+          padding: 10px 18px; border-radius: 8px; text-decoration: none;
+          font-weight: 500; margin-right: 8px; }}
+  .cta.alt {{ background: #eee; color: #222; }}
+  table.funnel {{ border-collapse: collapse; width: 100%; }}
+  table.funnel td {{ padding: 6px 8px; border-bottom: 1px solid #eee; }}
+  table.funnel td.n {{ font-weight: 600; text-align: right; width: 60px; }}
+  .pct {{ color: #888; font-size: 13px; }}
+  .cancel {{ color: #888; font-size: 13px; margin: 6px 0 0; }}
+  .app {{ border: 1px solid #ddd; border-radius: 8px;
+          padding: 10px 12px; margin: 8px 0; background: #fafafa; }}
+  .app-head {{ font-size: 14px; }}
+  .ts {{ color: #999; font-size: 12px; margin: 2px 0 6px; }}
+  .ex {{ color: #555; font-size: 13px; word-break: break-word; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }}
+  @media (max-width: 600px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+</style>
+</head>
+<body>
+  <h1>📊 UGC бот · админка</h1>
+  <div class="sub">Обновляется автоматически каждые 60 сек · записей в Events: {len(events)} · заявок в Sheet: {len(apps)}</div>
+
+  <div>
+    <a class="cta" href="https://t.me/{BOT_USERNAME}" target="_blank">🤖 Открыть @{BOT_USERNAME}</a>
+    <a class="cta alt" href="">🔄 Обновить</a>
+  </div>
+
+  <div class="grid">
+    <div>{funnel_table('За 24 часа', agg_24h)}</div>
+    <div>{funnel_table('За всё время', agg_all)}</div>
+  </div>
+
+  <h3>Последние заявки ({len(apps)} всего)</h3>
+  {apps_html}
+
+</body></html>"""
 
 
 def _build_summary(data: dict) -> str:
@@ -527,6 +632,22 @@ async def main() -> None:
     )
     # Health-check для Render — без него free web service считается «непросыпающимся»
     app.router.add_get("/", lambda r: web.Response(text="OK"))
+
+    async def admin_handler(request: web.Request) -> web.Response:
+        token = request.query.get("token", "")
+        if not ADMIN_WEB_TOKEN or not hmac.compare_digest(token, ADMIN_WEB_TOKEN):
+            return web.Response(text="forbidden", status=403)
+        try:
+            events = await asyncio.to_thread(read_events)
+            apps = await asyncio.to_thread(read_applications)
+        except Exception:
+            log.exception("admin: read failed")
+            return web.Response(text="sheets read failed, check logs", status=500)
+        body = _render_admin_html(events, apps)
+        return web.Response(text=body, content_type="text/html", charset="utf-8")
+
+    app.router.add_get("/admin", admin_handler)
+
     setup_application(app, dp, bot=bot)
 
     port = int(os.getenv("PORT", "10000"))

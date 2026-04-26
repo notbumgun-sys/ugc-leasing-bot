@@ -116,3 +116,9 @@ def read_events() -> list[dict]:
     """Все события из листа Events. Для агрегации в /stats."""
     ws = _get_events_ws()
     return ws.get_all_records()
+
+
+def read_applications() -> list[dict]:
+    """Все заявки из листа Applications."""
+    ws = _get_ws()
+    return ws.get_all_records()
