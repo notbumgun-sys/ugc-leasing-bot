@@ -13,7 +13,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 WORKSHEET_NAME = "Applications"
-HEADERS = ["timestamp", "tg_id", "tg_username", "examples", "experience", "contact", "name"]
+# Новые колонки добавляем В КОНЕЦ — auto-upgrade в _get_ws() переписывает только
+# шапку, не двигает данные. Если вставить в середину, старые ряды поедут.
+HEADERS = [
+    "timestamp", "tg_id", "tg_username",
+    "examples", "experience", "contact", "name",
+    "tg_first_name", "tg_last_name",
+]
 
 EVENTS_WS_NAME = "Events"
 EVENTS_HEADERS = ["timestamp", "tg_id", "tg_username", "event", "extra"]
@@ -72,6 +78,8 @@ def append_application(data: dict) -> None:
             data.get("experience", ""),
             data.get("contact", ""),
             data.get("name", ""),
+            data.get("tg_first_name", ""),
+            data.get("tg_last_name", ""),
         ],
         value_input_option="USER_ENTERED",
     )

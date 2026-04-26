@@ -262,9 +262,19 @@ def _render_admin_html(events: list[dict], apps: list[dict]) -> str:
         name = html.escape(str(a.get("name", "") or "—"))
         contact = html.escape(str(a.get("contact", "")))
         username = html.escape(str(a.get("tg_username", "") or ""))
+        tg_first = html.escape(str(a.get("tg_first_name", "") or ""))
+        tg_last = html.escape(str(a.get("tg_last_name", "") or ""))
+        tg_full = (tg_first + " " + tg_last).strip()
         examples = html.escape(str(a.get("examples", "") or ""))[:300]
         experience = html.escape(str(a.get("experience", "") or ""))[:200]
-        uname_html = f'<a href="https://t.me/{username}" target="_blank">@{username}</a>' if username else "—"
+        if username:
+            uname_html = f'<a href="https://t.me/{username}" target="_blank">@{username}</a>'
+        else:
+            tg_id = a.get("tg_id", "")
+            uname_html = f'tg://user?id={tg_id}' if tg_id else "—"
+            uname_html = f'<a href="{uname_html}">id {tg_id}</a>' if tg_id else "—"
+        if tg_full:
+            uname_html += f" · {tg_full}"
         apps_blocks.append(
             f"""<div class="app">
                 <div class="app-head"><b>{name}</b> · {contact} · {uname_html}</div>
@@ -462,9 +472,16 @@ async def got_name(m: Message, state: FSMContext):
 
 @router.message(Form.contact)
 async def got_contact(m: Message, state: FSMContext):
+    update = {}
     if m.contact:
         phone = m.contact.phone_number or ""
         contact_text = f"тел.: {phone}" if phone else ""
+        # Telegram при request_contact кладёт имя самого пользователя в contact —
+        # сохраняем как доп. источник, если поле name юзер ввёл небрежно
+        if m.contact.first_name:
+            update["contact_first_name"] = m.contact.first_name
+        if m.contact.last_name:
+            update["contact_last_name"] = m.contact.last_name
     else:
         err = _validate_text(m)
         if err:
@@ -476,7 +493,8 @@ async def got_contact(m: Message, state: FSMContext):
         await m.answer("Не понял контакт — попробуй ещё раз.", reply_markup=kb_contact())
         return
 
-    await state.update_data(contact=contact_text)
+    update["contact"] = contact_text
+    await state.update_data(**update)
     await state.set_state(Form.confirm)
     data = await state.get_data()
     _track(m, "step_contact")
@@ -502,9 +520,15 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
         return
 
     data = await state.get_data()
+    # Telegram-имя: приоритет у того что сам пользователь вбил в request_contact
+    # (это часто более полное), иначе берём from_user (что выставлено в профиле).
+    tg_first = data.get("contact_first_name") or (m.from_user.first_name or "")
+    tg_last = data.get("contact_last_name") or (m.from_user.last_name or "")
     payload = {
         "tg_id": m.from_user.id,
         "tg_username": m.from_user.username or "",
+        "tg_first_name": tg_first,
+        "tg_last_name": tg_last,
         "examples": data.get("examples", ""),
         "experience": data.get("experience", ""),
         "contact": data.get("contact", ""),
@@ -533,11 +557,17 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
     await m.answer(THANKS, reply_markup=kb())
 
     log.info("Новая заявка от @%s (id=%s)", payload["tg_username"], payload["tg_id"])
+    tg_full = (payload["tg_first_name"] + " " + payload["tg_last_name"]).strip()
+    tg_handle = f"@{payload['tg_username']}" if payload['tg_username'] else "(без username)"
+    tg_line = f"TG: {tg_handle}"
+    if tg_full:
+        tg_line += f" — {tg_full}"
+    tg_line += f" (id {payload['tg_id']})"
     await _notify_admins(
         bot,
         "🆕 Новая заявка UGC\n\n"
         f"Имя: {payload['name']}\n"
-        f"TG: @{payload['tg_username'] or '—'} (id {payload['tg_id']})\n"
+        f"{tg_line}\n"
         f"Контакт: {payload['contact']}\n\n"
         f"Примеры:\n{payload['examples'][:500]}\n\n"
         f"Опыт:\n{payload['experience'][:500]}",

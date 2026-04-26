@@ -62,7 +62,11 @@ async def run() -> int:
     # --- Сценарий 1: full happy path ---
     uid1 = 999_888_777
     bot_mod._last_submission.pop(uid1, None)
-    user = MagicMock(); user.id = uid1; user.username = "e2e_full"
+    user = MagicMock()
+    user.id = uid1
+    user.username = "e2e_full"
+    user.first_name = "Иван"
+    user.last_name = "Тестов"
     chat = MagicMock(); chat.id = uid1
     state = FSMContext(storage=storage, key=StorageKey(bot_id=0, chat_id=uid1, user_id=uid1))
 
@@ -95,13 +99,13 @@ async def run() -> int:
     ws = sheets_mod._get_ws()
     rows = ws.get_all_values()
     last = rows[-1]
-    print(f"  Sheets last row: ts={last[0]} contact={last[5][:40]!r} name={last[6]!r}")
-    expected = (str(uid1), "e2e_full", EXAMPLES, EXPERIENCE, CONTACT, NAME)
-    actual = (last[1], last[2], last[3], last[4], last[5], last[6])
+    print(f"  Sheets last row: ts={last[0]} contact={last[5][:40]!r} name={last[6]!r} tg_first={last[7]!r} tg_last={last[8]!r}")
+    expected = (str(uid1), "e2e_full", EXAMPLES, EXPERIENCE, CONTACT, NAME, "Иван", "Тестов")
+    actual = (last[1], last[2], last[3], last[4], last[5], last[6], last[7], last[8])
     if actual != expected:
         print(f"  ❌ FAIL\n     expected: {expected}\n     got:      {actual}")
         return 1
-    print("  ✅ Запись в Sheets корректна (с колонкой name)")
+    print("  ✅ Запись в Sheets корректна (с tg_first_name/tg_last_name)")
 
     ws.delete_rows(len(rows))
     print("  ✅ Тестовая строка удалена")
@@ -110,7 +114,11 @@ async def run() -> int:
     print("\n--- Сценарий 2: «↩️ Назад» по всем шагам, включая финальный confirm ---")
     uid2 = 2
     state2 = FSMContext(storage=storage, key=StorageKey(bot_id=0, chat_id=uid2, user_id=uid2))
-    user2 = MagicMock(); user2.id = uid2; user2.username = "back_tester"
+    user2 = MagicMock()
+    user2.id = uid2
+    user2.username = "back_tester"
+    user2.first_name = "Назад"
+    user2.last_name = "Тестов"
     chat2 = MagicMock(); chat2.id = uid2
 
     await bot_mod.cmd_start(_mk_msg(user2, chat2, "/start"), state2)
@@ -150,7 +158,11 @@ async def run() -> int:
     uid3 = 3
     bot_mod._last_submission.pop(uid3, None)
     state3 = FSMContext(storage=storage, key=StorageKey(bot_id=0, chat_id=uid3, user_id=uid3))
-    user3 = MagicMock(); user3.id = uid3; user3.username = "contact_share"
+    user3 = MagicMock()
+    user3.id = uid3
+    user3.username = ""  # без username — fallback на first_name/contact
+    user3.first_name = "Юзер"
+    user3.last_name = "БезЮзернейма"
     chat3 = MagicMock(); chat3.id = uid3
 
     await bot_mod.cmd_start(_mk_msg(user3, chat3, "/start"), state3)
@@ -186,6 +198,11 @@ async def run() -> int:
     last = rows[-1]
     assert last[6] == "[E2E TEST] Новое Имя"
     assert last[5] == "[E2E TEST] @new_contact"
+    # Юзер без username — приоритет имя из shared контакта (Иван Петров),
+    # потом откатывался назад и контакт был перебит на текстовый, но имя из contact
+    # всё равно осело в FSM data → должно сохраниться в tg_first_name
+    assert last[7] in ("Иван", "Юзер"), f"tg_first_name={last[7]!r}"
+    print(f"  ✅ Без username попал tg_first_name={last[7]!r}, tg_last_name={last[8]!r}")
     ws.delete_rows(len(rows))
     print("  ✅ Финальная заявка содержит ОБНОВЛЁННЫЕ значения")
 
