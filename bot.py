@@ -503,6 +503,11 @@ def _render_admin_html(
     display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
   }}
   details.user > summary::-webkit-details-marker, details.lead > summary::-webkit-details-marker {{ display: none; }}
+  details.user > summary::before, details.lead > summary::before {{
+    content: "▶"; color: #aaa; font-size: 11px;
+    transition: transform 0.15s; display: inline-block;
+  }}
+  details[open] > summary::before {{ transform: rotate(90deg); }}
   details[open] > summary {{ border-bottom: 1px solid #eef0f4; background: #fafbfc; }}
   .summary-name {{ font-weight: 600; }}
   .summary-meta {{ color: #888; font-size: 13px; }}
@@ -626,9 +631,15 @@ def _render_tab_users(events: list[dict], apps: list[dict]) -> str:
             (f"@{username}" if username else "") or
             f"id {u['tg_id']}"
         )
-        contact_html = (
-            f'<a href="https://t.me/{html.escape(username)}" target="_blank">@{html.escape(username)}</a>'
-            if username else f'<a href="tg://user?id={u["tg_id"]}">id {u["tg_id"]}</a>'
+        # В summary — только ТЕКСТ контакта (без <a>): иначе клик по ссылке
+        # перехватывает event и <details> не раскрывается. Ссылка — в теле.
+        contact_label = (
+            f'@{html.escape(username)}' if username
+            else f'id {u["tg_id"]}'
+        )
+        contact_link_html = (
+            f'<a href="https://t.me/{html.escape(username)}" target="_blank">@{html.escape(username)} →</a>'
+            if username else f'<a href="tg://user?id={u["tg_id"]}">id {u["tg_id"]} →</a>'
         )
         last_short = u["last_ts"][:19].replace("T", " ")
         first_short = u["first_ts"][:19].replace("T", " ")
@@ -662,13 +673,13 @@ def _render_tab_users(events: list[dict], apps: list[dict]) -> str:
             f'<details class="user">'
             f'<summary>'
             f'<span class="summary-name">{html.escape(display)}</span>'
-            f'<span class="summary-meta">{contact_html}</span>'
+            f'<span class="summary-meta">{contact_label}</span>'
             f'<span class="summary-meta">· {len(u["events"])} событий</span>'
             f'<span class="summary-meta">· последнее: {html.escape(last_short)}</span>'
             f'{badges_html}'
             f'</summary>'
             f'<div class="body-pad">'
-            f'<p class="muted">Первое событие: {html.escape(first_short)} · последнее: {html.escape(last_short)}</p>'
+            f'<p class="muted">Контакт: {contact_link_html} · первое: {html.escape(first_short)} · последнее: {html.escape(last_short)}</p>'
             f'{leads_html}'
             f'<h3>Таймлайн ({len(u["events"])} событий)</h3>'
             f'{timeline}'
@@ -698,22 +709,30 @@ def _render_tab_leads(apps: list[dict]) -> str:
         tg_full = (tg_first + " " + tg_last).strip()
         examples = html.escape(str(a.get("examples", "") or ""))
         experience = html.escape(str(a.get("experience", "") or ""))
+        # Текстовый лейбл для summary (без <a>) и кликабельная ссылка для тела
         if username:
-            uname_html = f'<a href="https://t.me/{html.escape(username)}" target="_blank">@{html.escape(username)}</a>'
+            uname_label = f'@{html.escape(username)}'
+            uname_link = f'<a href="https://t.me/{html.escape(username)}" target="_blank">@{html.escape(username)} →</a>'
+        elif tg_id:
+            uname_label = f'id {tg_id}'
+            uname_link = f'<a href="tg://user?id={tg_id}">id {tg_id} →</a>'
         else:
-            uname_html = f'<a href="tg://user?id={tg_id}">id {tg_id}</a>' if tg_id else "—"
+            uname_label = "—"
+            uname_link = "—"
         if tg_full:
-            uname_html += f' · <span class="muted">{tg_full}</span>'
+            uname_label += f' · {tg_full}'
+            uname_link += f' · <span class="muted">{tg_full}</span>'
 
         blocks.append(
             f'<details class="lead">'
             f'<summary>'
             f'<span class="summary-name">{name}</span>'
             f'<span class="summary-meta">· {contact}</span>'
-            f'<span class="summary-meta">· {uname_html}</span>'
+            f'<span class="summary-meta">· {uname_label}</span>'
             f'<span class="summary-meta" style="margin-left:auto">{html.escape(ts)}</span>'
             f'</summary>'
             f'<div class="body-pad lead-grid">'
+            f'<div style="grid-column: 1 / -1"><div class="field-label">TG</div><div class="field-value">{uname_link}</div></div>'
             f'<div style="grid-column: 1 / -1"><div class="field-label">Примеры</div><div class="field-value">{examples}</div></div>'
             f'<div style="grid-column: 1 / -1"><div class="field-label">Опыт</div><div class="field-value">{experience}</div></div>'
             f'</div></details>'
