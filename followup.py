@@ -346,6 +346,37 @@ async def cb_demo(cq: CallbackQuery) -> None:
     )
 
 
+def _demo_terms_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Ок, пришлите ТЗ", callback_data="fu_demo:ready")],
+        [InlineKeyboardButton(text="❌ Не актуально", callback_data="fu_demo:decline")],
+    ])
+
+
+@router.callback_query(F.data == "fu_demo:ready")
+async def cb_demo_ready(cq: CallbackQuery) -> None:
+    await cq.answer("🧪 Dry-run: показываю сценарий кандидата, Sheets не меняю.")
+    if cq.message:
+        await _clear_message_keyboard(cq)
+        await _send_test_brief(cq.message)
+
+
+@router.callback_query(F.data == "fu_demo:terms")
+async def cb_demo_terms(cq: CallbackQuery) -> None:
+    await cq.answer("🧪 Dry-run: показываю условия, Sheets не меняю.")
+    if cq.message:
+        await _clear_message_keyboard(cq)
+        await cq.message.reply(TERMS_TEXT, reply_markup=_demo_terms_kb())
+
+
+@router.callback_query(F.data == "fu_demo:decline")
+async def cb_demo_decline(cq: CallbackQuery) -> None:
+    await cq.answer("🧪 Dry-run: показываю отказ, Sheets не меняю.")
+    if cq.message:
+        await _clear_message_keyboard(cq)
+        await cq.message.reply("Понял, спасибо, что откликнулись. Не будем больше беспокоить.")
+
+
 @router.callback_query(F.data.startswith("fu_u:decline:"))
 async def cb_user_decline(cq: CallbackQuery, state: FSMContext) -> None:
     tg_id = int(cq.data.split(":")[2])
@@ -437,12 +468,11 @@ async def _send_to_user(bot: Bot, tg_id: int, text: str) -> None:
 
 
 def _demo_user_kb() -> InlineKeyboardMarkup:
-    """Демо-кнопки для dry-run: визуально как у кандидата, но при клике
-    показывают alert. callback_data='fu_demo' → cb_demo."""
+    """Демо-кнопки для dry-run: показывают сценарий кандидата, но не меняют Sheets."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Готов(а), пришлите ТЗ", callback_data="fu_demo")],
-        [InlineKeyboardButton(text="💬 Сначала условия", callback_data="fu_demo")],
-        [InlineKeyboardButton(text="❌ Не актуально", callback_data="fu_demo")],
+        [InlineKeyboardButton(text="✅ Готов(а), пришлите ТЗ", callback_data="fu_demo:ready")],
+        [InlineKeyboardButton(text="💬 Сначала условия", callback_data="fu_demo:terms")],
+        [InlineKeyboardButton(text="❌ Не актуально", callback_data="fu_demo:decline")],
     ])
 
 

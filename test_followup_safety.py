@@ -69,6 +69,7 @@ async def test_dry_run_is_at_most_once():
     assert len(bot.sent) == 1
     assert bot.sent[0]["chat_id"] == 647035299
     assert bot.sent[0]["reply_markup"] is not None
+    assert bot.sent[0]["reply_markup"].inline_keyboard[0][0].callback_data == "fu_demo:ready"
 
     counts = await followup._process_one_tick(bot)
     assert counts["dry_run"] == 0
@@ -115,6 +116,9 @@ def test_candidate_brief_is_complete():
     kb = followup._terms_kb(123)
     assert kb.inline_keyboard[0][0].text == "✅ Ок, пришлите ТЗ"
     assert kb.inline_keyboard[0][0].callback_data == "fu_u:ready:123"
+
+    demo_kb = followup._demo_terms_kb()
+    assert demo_kb.inline_keyboard[0][0].callback_data == "fu_demo:ready"
 
 
 async def test_send_test_brief_sends_text_and_pdf():
