@@ -164,8 +164,12 @@ def find_application_row(tg_id: int | str) -> int | None:
 
 
 def has_active_followup(tg_id: int | str) -> bool:
-    """True если у tg_id есть строка с непустым followup_state (любой статус
-    кроме пустого) — чтобы не плодить дубли follow-up при повторной заявке."""
+    """True если у tg_id уже есть незавершённый follow-up.
+
+    Терминальные статусы (dry_run_sent/skipped/blocked) и завершённые ответы
+    кандидата не блокируют новую заявку. Это важно для dry-run: одна тестовая
+    песочница не должна навсегда запрещать повторную заявку с того же аккаунта.
+    """
     ws = _get_ws()
     rows = ws.get_all_values()
     if len(rows) < 2:
@@ -176,11 +180,25 @@ def has_active_followup(tg_id: int | str) -> bool:
         col_state = headers.index("followup_state")
     except ValueError:
         return False
+    try:
+        col_response = headers.index("test_response")
+    except ValueError:
+        col_response = None
     target = str(tg_id)
+    active_states = {"pending", "approved", "sending"}
+    terminal_responses = {"declined", "submitted"}
     for r in rows[1:]:
         if len(r) <= max(col_tg, col_state):
             continue
-        if r[col_tg] == target and r[col_state].strip():
+        if r[col_tg] != target:
+            continue
+        state = r[col_state].strip()
+        response = ""
+        if col_response is not None and len(r) > col_response:
+            response = r[col_response].strip()
+        if state in active_states:
+            return True
+        if state == "sent" and response not in terminal_responses:
             return True
     return False
 

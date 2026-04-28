@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import followup
+import sheets
 
 
 class FakeBot:
@@ -33,6 +34,14 @@ class FakeBriefMessage:
 
     async def answer_document(self, document, caption=None, **kwargs):
         self.documents.append({"document": document, "caption": caption})
+
+
+class FakeWorksheet:
+    def __init__(self, rows: list[list[str]]):
+        self.rows = rows
+
+    def get_all_values(self):
+        return self.rows
 
 
 def _install_fake_sheet(row: dict):
@@ -130,12 +139,42 @@ async def test_send_test_brief_sends_text_and_pdf():
     assert "Комикс-ТЗ" in message.documents[0]["caption"]
 
 
+def test_dry_run_does_not_block_new_application():
+    old_get_ws = sheets._get_ws
+    headers = sheets.HEADERS
+    rows = [headers]
+    for state, response in [
+        ("dry_run_sent", ""),
+        ("skipped", ""),
+        ("blocked", ""),
+        ("sent", "submitted"),
+        ("sent", "declined"),
+    ]:
+        row = [""] * len(headers)
+        row[headers.index("tg_id")] = "123"
+        row[headers.index("followup_state")] = state
+        row[headers.index("test_response")] = response
+        rows.append(row)
+    try:
+        sheets._get_ws = lambda: FakeWorksheet(rows)
+        assert sheets.has_active_followup("123") is False
+
+        pending = [""] * len(headers)
+        pending[headers.index("tg_id")] = "123"
+        pending[headers.index("followup_state")] = "pending"
+        rows.append(pending)
+        assert sheets.has_active_followup("123") is True
+    finally:
+        sheets._get_ws = old_get_ws
+
+
 async def main() -> int:
     await test_dry_run_is_at_most_once()
     await test_old_dry_run_row_never_goes_real()
     test_approve_button_uses_actual_delay()
     test_candidate_brief_is_complete()
     await test_send_test_brief_sends_text_and_pdf()
+    test_dry_run_does_not_block_new_application()
     print("ALL FOLLOWUP SAFETY TESTS PASSED")
     return 0
 
