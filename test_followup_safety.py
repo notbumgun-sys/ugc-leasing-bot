@@ -129,6 +129,10 @@ def test_candidate_brief_is_complete():
     demo_kb = followup._demo_terms_kb()
     assert demo_kb.inline_keyboard[0][0].callback_data == "fu_demo:ready"
 
+    decline_kb = followup._decline_return_kb(123)
+    assert decline_kb.inline_keyboard[0][0].callback_data == "fu_u:ready:123"
+    assert decline_kb.inline_keyboard[1][0].callback_data == "fu_u:terms:123"
+
 
 async def test_send_test_brief_sends_text_and_pdf():
     message = FakeBriefMessage()
@@ -168,6 +172,35 @@ def test_dry_run_does_not_block_new_application():
         sheets._get_ws = old_get_ws
 
 
+def test_moscow_work_window_schedule():
+    old_delay = followup.FOLLOWUP_DELAY_SEC
+    try:
+        followup.FOLLOWUP_DELAY_SEC = 3 * 3600
+
+        # 12:00 МСК approve +3ч = 15:00 МСК, остаётся сегодня.
+        send_after = followup._calculate_send_after(
+            datetime(2026, 4, 28, 9, 0, tzinfo=timezone.utc)
+        )
+        assert send_after == datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+        assert followup._format_send_after_msk(send_after) == "28.04 15:00 МСК"
+
+        # 16:30 МСК approve +3ч = 19:30 МСК, перенос на завтра 09:00 МСК.
+        send_after = followup._calculate_send_after(
+            datetime(2026, 4, 28, 13, 30, tzinfo=timezone.utc)
+        )
+        assert send_after == datetime(2026, 4, 29, 6, 0, tzinfo=timezone.utc)
+        assert followup._format_send_after_msk(send_after) == "29.04 09:00 МСК"
+
+        # 05:00 МСК approve +3ч = 08:00 МСК, ждём до 09:00 МСК.
+        send_after = followup._calculate_send_after(
+            datetime(2026, 4, 28, 2, 0, tzinfo=timezone.utc)
+        )
+        assert send_after == datetime(2026, 4, 28, 6, 0, tzinfo=timezone.utc)
+        assert followup._format_send_after_msk(send_after) == "28.04 09:00 МСК"
+    finally:
+        followup.FOLLOWUP_DELAY_SEC = old_delay
+
+
 async def main() -> int:
     await test_dry_run_is_at_most_once()
     await test_old_dry_run_row_never_goes_real()
@@ -175,6 +208,7 @@ async def main() -> int:
     test_candidate_brief_is_complete()
     await test_send_test_brief_sends_text_and_pdf()
     test_dry_run_does_not_block_new_application()
+    test_moscow_work_window_schedule()
     print("ALL FOLLOWUP SAFETY TESTS PASSED")
     return 0
 

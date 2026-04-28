@@ -5,6 +5,7 @@
      Здесь генерируется followup_draft, пишется в Sheets (state=pending),
      админу уходит сообщение с inline-кнопками [Одобрить +3ч] [Пропустить].
   2. Админ жмёт Одобрить → state=approved, send_after=now+3h.
+     Если время выходит за 09:00–18:00 МСК — переносит на ближайшее рабочее окно.
   3. Scheduler в основном процессе раз в 5 минут читает Sheets, ищет
      approved-строки с send_after <= now. Перед отправкой ставит state=sending,
      потом sendMessage кандидату, потом state=sent.
@@ -30,6 +31,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
@@ -76,6 +78,23 @@ FOLLOWUP_DELAY_SEC = int(os.getenv("FOLLOWUP_DELAY_SEC", str(3 * 3600)))
 FOLLOWUP_TICK_SEC = int(os.getenv("FOLLOWUP_TICK_SEC", "300"))
 # Recovery: stuck `sending` старше этого считаем доставленными (at-most-once).
 SENDING_TIMEOUT_SEC = 60
+FOLLOWUP_TIMEZONE = os.getenv("FOLLOWUP_TIMEZONE", "Europe/Moscow")
+WORK_START_HOUR = int(os.getenv("FOLLOWUP_WORK_START_HOUR", "9"))
+WORK_END_HOUR = int(os.getenv("FOLLOWUP_WORK_END_HOUR", "18"))
+
+
+def _load_work_tz(name: str):
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        # На Windows в локальном venv может не быть пакета tzdata. Для Москвы
+        # безопасный fallback — фиксированный UTC+3, т.к. сезонного перевода нет.
+        if name in {"Europe/Moscow", "MSK"}:
+            return timezone(timedelta(hours=3), name="MSK")
+        raise
+
+
+WORK_TZ = _load_work_tz(FOLLOWUP_TIMEZONE)
 
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DRY_RUN_ADMIN_IDS = [
@@ -133,6 +152,40 @@ def _delay_label(seconds: int) -> str:
     return f"{hours:.1f}ч"
 
 
+def _apply_work_window(dt_utc: datetime) -> datetime:
+    """Возвращает ближайшее разрешённое время отправки в рабочем окне МСК.
+
+    dt_utc уже включает задержку после approve. Если время попало до 09:00 МСК,
+    переносим на 09:00 того же дня. Если после/в 18:00 — на 09:00 следующего дня.
+    """
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    local = dt_utc.astimezone(WORK_TZ)
+    start = local.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
+    end = local.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
+    if local < start:
+        scheduled = start
+    elif local >= end:
+        scheduled = (local + timedelta(days=1)).replace(
+            hour=WORK_START_HOUR, minute=0, second=0, microsecond=0
+        )
+    else:
+        scheduled = local
+    return scheduled.astimezone(timezone.utc)
+
+
+def _calculate_send_after(now_utc: datetime | None = None) -> datetime:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    delayed = now_utc.astimezone(timezone.utc) + timedelta(seconds=FOLLOWUP_DELAY_SEC)
+    return _apply_work_window(delayed)
+
+
+def _format_send_after_msk(dt_utc: datetime) -> str:
+    return dt_utc.astimezone(WORK_TZ).strftime("%d.%m %H:%M МСК")
+
+
 def _admin_kb(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
@@ -155,6 +208,13 @@ def _terms_kb(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Ок, пришлите ТЗ", callback_data=f"fu_u:ready:{tg_id}")],
         [InlineKeyboardButton(text="❌ Не актуально", callback_data=f"fu_u:decline:{tg_id}")],
+    ])
+
+
+def _decline_return_kb(tg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Передумал(а), пришлите ТЗ", callback_data=f"fu_u:ready:{tg_id}")],
+        [InlineKeyboardButton(text="💬 Посмотреть условия", callback_data=f"fu_u:terms:{tg_id}")],
     ])
 
 
@@ -226,17 +286,19 @@ async def cb_admin_approve(cq: CallbackQuery) -> None:
     if cur_state != "pending":
         await cq.answer(f"Состояние {cur_state!r}, approve не применим", show_alert=True)
         return
-    send_after = (datetime.now(timezone.utc) + timedelta(seconds=FOLLOWUP_DELAY_SEC)).isoformat(timespec="seconds")
+    send_after_dt = _calculate_send_after()
+    send_after = send_after_dt.isoformat(timespec="seconds")
+    send_after_label = _format_send_after_msk(send_after_dt)
     await asyncio.to_thread(
         update_application_fields,
         row_idx,
         {"followup_state": "approved", "followup_send_after": send_after},
     )
-    await cq.answer(f"Одобрено, отправка после {send_after[:16]}")
+    await cq.answer(f"Одобрено, отправка после {send_after_label}")
     if cq.message:
         try:
             await cq.message.edit_reply_markup(reply_markup=None)
-            await cq.message.reply(f"✅ Одобрено. Уйдёт после {send_after[:16]} UTC")
+            await cq.message.reply(f"✅ Одобрено. Уйдёт после {send_after_label}")
         except Exception:
             pass
 
@@ -353,6 +415,13 @@ def _demo_terms_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _demo_decline_return_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Передумал(а), пришлите ТЗ", callback_data="fu_demo:ready")],
+        [InlineKeyboardButton(text="💬 Посмотреть условия", callback_data="fu_demo:terms")],
+    ])
+
+
 @router.callback_query(F.data == "fu_demo:ready")
 async def cb_demo_ready(cq: CallbackQuery) -> None:
     await cq.answer("🧪 Dry-run: показываю сценарий кандидата, Sheets не меняю.")
@@ -374,7 +443,11 @@ async def cb_demo_decline(cq: CallbackQuery) -> None:
     await cq.answer("🧪 Dry-run: показываю отказ, Sheets не меняю.")
     if cq.message:
         await _clear_message_keyboard(cq)
-        await cq.message.reply("Понял, спасибо, что откликнулись. Не будем больше беспокоить.")
+        await cq.message.reply(
+            "Понял, спасибо за ответ.\n\n"
+            "Если передумаете, можно вернуться к тестовому заданию ниже.",
+            reply_markup=_demo_decline_return_kb(),
+        )
 
 
 @router.callback_query(F.data.startswith("fu_u:decline:"))
@@ -386,7 +459,11 @@ async def cb_user_decline(cq: CallbackQuery, state: FSMContext) -> None:
     await cq.answer()
     if cq.message:
         await _clear_message_keyboard(cq)
-        await cq.message.reply("Понял, спасибо, что откликнулись. Не будем больше беспокоить.")
+        await cq.message.reply(
+            "Понял, спасибо за ответ.\n\n"
+            "Если передумаете, можно вернуться к тестовому заданию ниже.",
+            reply_markup=_decline_return_kb(tg_id),
+        )
     await state.clear()
 
 
