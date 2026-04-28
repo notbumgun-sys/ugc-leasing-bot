@@ -1128,10 +1128,20 @@ async def main() -> None:
     webhook_url = f"{base_url}{webhook_path}"
     webhook_secret = os.getenv("WEBHOOK_SECRET", "ugc-leasing-secret")
 
+    # allowed_updates: явно перечисляем типы, которые нужны хэндлерам.
+    # Без этого Telegram запоминает прошлый набор (у нас в проде висел только
+    # 'message' — все callback_query от inline-кнопок молча отбрасывались).
+    allowed = dp.resolve_used_update_types()
     await bot.set_webhook(
-        webhook_url, secret_token=webhook_secret, drop_pending_updates=True
+        webhook_url,
+        secret_token=webhook_secret,
+        drop_pending_updates=True,
+        allowed_updates=allowed,
     )
-    log.info("Webhook установлен: %s, админов: %s", webhook_url, len(ADMIN_IDS))
+    log.info(
+        "Webhook установлен: %s, админов: %s, allowed_updates: %s",
+        webhook_url, len(ADMIN_IDS), allowed,
+    )
 
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=webhook_secret).register(
