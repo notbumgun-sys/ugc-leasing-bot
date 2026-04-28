@@ -21,7 +21,7 @@ HEADERS = [
     "examples", "experience", "contact", "name",
     "tg_first_name", "tg_last_name",
     # follow-up MVP (этап 1, без AI):
-    "followup_state",         # pending|approved|sending|sent|blocked|skipped
+    "followup_state",         # pending|approved|sending|sent|blocked|skipped|dry_run_sent
     "followup_draft",         # сгенерированный текст follow-up
     "followup_send_after",    # ISO-таймстемп когда можно слать
     "followup_sent_at",       # ISO-таймстемп фактической отправки

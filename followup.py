@@ -9,7 +9,8 @@
      approved-строки с send_after <= now. Перед отправкой ставит state=sending,
      потом sendMessage кандидату, потом state=sent.
   4. Если FOLLOWUP_DRY_RUN=true — вместо кандидата шлёт в админ-группу,
-     followup_state НЕ трогает, ставит dry_run_sent_at.
+     заранее ставит followup_state=dry_run_sent и dry_run_sent_at, чтобы не
+     спамить повторно и не отправить эту строку кандидату при выключении dry-run.
   5. Кандидат жмёт «Готов» → бот спрашивает видео, test_response=accepted →
      ждёт файл/ссылку → test_response=submitted, test_video_url=...
 
@@ -75,6 +76,9 @@ FOLLOWUP_TICK_SEC = int(os.getenv("FOLLOWUP_TICK_SEC", "300"))
 SENDING_TIMEOUT_SEC = 60
 
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+DRY_RUN_ADMIN_IDS = [
+    int(x) for x in os.getenv("FOLLOWUP_DRY_RUN_ADMIN_IDS", "").split(",") if x.strip()
+] or ADMIN_IDS
 
 
 # --- FSM для приёма видео от кандидата --------------------------------------
@@ -108,9 +112,24 @@ def build_draft(name: str, examples: str, experience: str) -> str:
 
 # --- Inline keyboards --------------------------------------------------------
 
+def _delay_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}с"
+    if seconds < 3600:
+        minutes = max(1, round(seconds / 60))
+        return f"{minutes}мин"
+    hours = seconds / 3600
+    if hours.is_integer():
+        return f"{int(hours)}ч"
+    return f"{hours:.1f}ч"
+
+
 def _admin_kb(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Одобрить +3ч", callback_data=f"fu:approve:{tg_id}"),
+        InlineKeyboardButton(
+            text=f"✅ Одобрить +{_delay_label(FOLLOWUP_DELAY_SEC)}",
+            callback_data=f"fu:approve:{tg_id}",
+        ),
         InlineKeyboardButton(text="❌ Пропустить", callback_data=f"fu:skip:{tg_id}"),
     ]])
 
@@ -185,7 +204,7 @@ async def cb_admin_approve(cq: CallbackQuery) -> None:
         return
     cur_state = str(rec.get("followup_state", "")).strip()
     # Идемпотентность: если уже approved/sending/sent — игнор.
-    if cur_state in {"approved", "sending", "sent", "blocked"}:
+    if cur_state in {"approved", "sending", "sent", "blocked", "dry_run_sent"}:
         await cq.answer(f"Уже: {cur_state}", show_alert=False)
         return
     if cur_state != "pending":
@@ -272,6 +291,15 @@ async def cb_user_terms(cq: CallbackQuery, state: FSMContext) -> None:
         await cq.message.reply(TERMS_TEXT, reply_markup=_user_kb(tg_id))
 
 
+@router.callback_query(F.data == "fu_demo")
+async def cb_demo(cq: CallbackQuery) -> None:
+    await cq.answer(
+        "🧪 Демо: в dry-run кнопки только показывают, как это выглядит. "
+        "У реального кандидата эта кнопка будет рабочей.",
+        show_alert=True,
+    )
+
+
 @router.callback_query(F.data.startswith("fu_u:decline:"))
 async def cb_user_decline(cq: CallbackQuery, state: FSMContext) -> None:
     tg_id = int(cq.data.split(":")[2])
@@ -342,16 +370,25 @@ async def _send_to_user(bot: Bot, tg_id: int, text: str) -> None:
     await bot.send_message(tg_id, text, reply_markup=_user_kb(tg_id))
 
 
+def _demo_user_kb() -> InlineKeyboardMarkup:
+    """Демо-кнопки для dry-run: визуально как у кандидата, но при клике
+    показывают alert. callback_data='fu_demo' → cb_demo."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готов(а), пришлите ТЗ", callback_data="fu_demo")],
+        [InlineKeyboardButton(text="💬 Сначала условия", callback_data="fu_demo")],
+        [InlineKeyboardButton(text="❌ Не актуально", callback_data="fu_demo")],
+    ])
+
+
 async def _send_dry_run(bot: Bot, candidate_tg_id: int, candidate_username: str, text: str) -> None:
     handle = f"@{candidate_username}" if candidate_username else f"id {candidate_tg_id}"
     body = (
         f"🧪 DRY RUN: должно было уйти кандидату {handle}\n\n"
-        f"— Текст —\n{text}\n\n"
-        "Кнопки кандидата: ✅ Готов / 💬 Условия / ❌ Не актуально"
+        f"— Текст —\n{text}"
     )
-    for admin_id in ADMIN_IDS:
+    for admin_id in DRY_RUN_ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, body)
+            await bot.send_message(admin_id, body, reply_markup=_demo_user_kb())
         except Exception:
             log.exception("dry_run: не смог отправить админу %s", admin_id)
 
@@ -419,16 +456,36 @@ async def _process_one_tick(bot: Bot) -> dict:
             )
             continue
 
-        # Dry-run: НЕ трогаем followup_state. Шлём только в админ-чат, отмечаем dry_run_sent_at.
+        # Dry-run: заранее помечаем строку как обработанную, потом шлём в админ-чат.
+        # Это at-most-once: лучше один dry-run не увидеть, чем спамить каждую минуту.
         if FOLLOWUP_DRY_RUN:
-            await _send_dry_run(bot, tg_id, str(rec.get("tg_username", "")), draft)
+            if str(rec.get("dry_run_sent_at", "")).strip():
+                continue
             await asyncio.to_thread(
                 update_application_fields,
                 row_idx,
-                {"dry_run_sent_at": now.isoformat(timespec="seconds")},
+                {
+                    "followup_state": "dry_run_sent",
+                    "dry_run_sent_at": now.isoformat(timespec="seconds"),
+                },
             )
+            await _send_dry_run(bot, tg_id, str(rec.get("tg_username", "")), draft)
             counts["dry_run"] += 1
             await asyncio.sleep(0.05)  # rate-limit: <=20/sec
+            continue
+
+        # Safety rail: строки, уже прошедшие dry-run, нельзя отправлять кандидату
+        # автоматически после переключения FOLLOWUP_DRY_RUN=false.
+        if str(rec.get("dry_run_sent_at", "")).strip():
+            counts["errors"] += 1
+            await asyncio.to_thread(
+                update_application_fields,
+                row_idx,
+                {
+                    "followup_state": "skipped",
+                    "followup_error_reason": "dry_run_sent_requires_new_approval",
+                },
+            )
             continue
 
         # Реальная отправка. Сначала ставим sending — это lock для второго прохода.
