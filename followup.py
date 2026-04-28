@@ -29,6 +29,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
@@ -36,6 +37,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -79,6 +81,13 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DRY_RUN_ADMIN_IDS = [
     int(x) for x in os.getenv("FOLLOWUP_DRY_RUN_ADMIN_IDS", "").split(",") if x.strip()
 ] or ADMIN_IDS
+
+SITE_URL = "https://xn--c1aeedbcapcxc2dyb.xn--p1ai/"
+TEST_PRICE_RUB = 700
+_tz_file_env = os.getenv("FOLLOWUP_TZ_FILE", "").strip()
+TZ_FILE_PATH = Path(_tz_file_env) if _tz_file_env else (
+    Path(__file__).parent / "assets" / "ugc_leasing_comic_5_slides_9x16.pdf"
+)
 
 
 # --- FSM для приёма видео от кандидата --------------------------------------
@@ -138,6 +147,13 @@ def _user_kb(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Готов(а), пришлите ТЗ", callback_data=f"fu_u:ready:{tg_id}")],
         [InlineKeyboardButton(text="💬 Сначала условия", callback_data=f"fu_u:terms:{tg_id}")],
+        [InlineKeyboardButton(text="❌ Не актуально", callback_data=f"fu_u:decline:{tg_id}")],
+    ])
+
+
+def _terms_kb(tg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Ок, пришлите ТЗ", callback_data=f"fu_u:ready:{tg_id}")],
         [InlineKeyboardButton(text="❌ Не актуально", callback_data=f"fu_u:decline:{tg_id}")],
     ])
 
@@ -249,23 +265,51 @@ async def cb_admin_skip(cq: CallbackQuery) -> None:
 # --- Callback handlers (кандидат) --------------------------------------------
 
 TERMS_TEXT = (
-    "Условия:\n"
-    "• оплата фикс за тестовое — обсудим в личке;\n"
-    "• хронометраж 15–30 секунд;\n"
-    "• ТЗ простое, без студии — снимать можно на телефон;\n"
-    "• тестовое видео НЕ публикуется без вашего отдельного согласия.\n\n"
-    "Готовы попробовать?"
+    "Конечно.\n\n"
+    f"Тестовое оплачиваемое: {TEST_PRICE_RUB} ₽ за ролик.\n\n"
+    "Формат: короткое вертикальное видео 15–30 секунд.\n"
+    f"Тема: ЛизингСток — сервис с авто и техникой из лизинга:\n{SITE_URL}\n\n"
+    "Мы не публикуем и не используем тест без вашего разрешения.\n"
+    "Нам нужно понять, получится ли у вас делать живой контент под нашу нишу.\n\n"
+    "Если готовы — пришлём комикс-ТЗ."
 )
 
 TZ_TEXT = (
-    "ТЗ:\n"
-    "• 15–30 секунд, вертикальное видео (9:16);\n"
-    "• общий план + крупный план себя или объекта;\n"
-    "• речь живая, не как презентация;\n"
-    "• в кадре любой повседневный контекст (машина, улица, дом);\n"
-    "• текст и формат можем подстроить — напишите, если нужно уточнить.\n\n"
-    "Когда готово — пришлите файл сюда или ссылку (Drive / Я.Диск / прямая ссылка)."
+    "Отлично, спасибо!\n\n"
+    f"Тестовое задание оплачиваемое: {TEST_PRICE_RUB} ₽ за ролик.\n\n"
+    "Нужно сделать короткое вертикальное видео 15–30 секунд для ЛизингСток:\n"
+    f"{SITE_URL}\n\n"
+    "Прикрепляем комикс-ТЗ как ориентир. Не нужно копировать его один в один — "
+    "это скорее пример логики: хук → проблема → выгодный лот/идея → интерес к сервису.\n\n"
+    "Можно сделать по-своему: с вашей подачей, юмором, монтажом, голосом, текстом на экране — как видите.\n\n"
+    "Так как это тест, не нужен дорогой продакшн или идеальная съёмка. "
+    "Нам важно понять вашу креативность, подачу и сможете ли вы делать живой контент в нашей нише.\n\n"
+    "Видео можно прислать сюда файлом или ссылкой — как удобнее."
 )
+
+
+async def _clear_message_keyboard(cq: CallbackQuery) -> None:
+    if not cq.message:
+        return
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def _send_test_brief(message: Message) -> None:
+    await message.reply(TZ_TEXT)
+    if TZ_FILE_PATH.exists():
+        await message.answer_document(
+            FSInputFile(TZ_FILE_PATH),
+            caption="Комикс-ТЗ. Используйте как ориентир, не как жёсткий шаблон.",
+        )
+    else:
+        log.error("follow-up TZ file is missing: %s", TZ_FILE_PATH)
+        await message.reply(
+            "Файл с комикс-ТЗ сейчас не прикрепился технически, но можно делать по описанию выше. "
+            "Мы отдельно проверим файл."
+        )
 
 
 @router.callback_query(F.data.startswith("fu_u:ready:"))
@@ -276,7 +320,8 @@ async def cb_user_ready(cq: CallbackQuery, state: FSMContext) -> None:
         await asyncio.to_thread(update_application_fields, row_idx, {"test_response": "accepted"})
     await cq.answer()
     if cq.message:
-        await cq.message.reply(TZ_TEXT)
+        await _clear_message_keyboard(cq)
+        await _send_test_brief(cq.message)
     await state.set_state(FollowupForm.waiting_video)
 
 
@@ -288,7 +333,8 @@ async def cb_user_terms(cq: CallbackQuery, state: FSMContext) -> None:
         await asyncio.to_thread(update_application_fields, row_idx, {"test_response": "wants_terms"})
     await cq.answer()
     if cq.message:
-        await cq.message.reply(TERMS_TEXT, reply_markup=_user_kb(tg_id))
+        await _clear_message_keyboard(cq)
+        await cq.message.reply(TERMS_TEXT, reply_markup=_terms_kb(tg_id))
 
 
 @router.callback_query(F.data == "fu_demo")
@@ -308,7 +354,8 @@ async def cb_user_decline(cq: CallbackQuery, state: FSMContext) -> None:
         await asyncio.to_thread(update_application_fields, row_idx, {"test_response": "declined"})
     await cq.answer()
     if cq.message:
-        await cq.message.reply("Понятно, спасибо за честность. Если передумаете — напишите.")
+        await _clear_message_keyboard(cq)
+        await cq.message.reply("Понял, спасибо, что откликнулись. Не будем больше беспокоить.")
     await state.clear()
 
 
@@ -319,17 +366,25 @@ async def on_test_video(m: Message, state: FSMContext) -> None:
     if not m.from_user:
         return
     video_ref = ""
+    should_copy_media = False
     if m.video:
         video_ref = f"file_id:{m.video.file_id}"
+        should_copy_media = True
     elif m.video_note:
         video_ref = f"video_note:{m.video_note.file_id}"
-    elif m.document and m.document.mime_type and m.document.mime_type.startswith("video/"):
-        video_ref = f"document:{m.document.file_id}"
+        should_copy_media = True
+    elif m.document:
+        file_name = (m.document.file_name or "").lower()
+        mime_type = (m.document.mime_type or "").lower()
+        is_video_doc = mime_type.startswith("video/") or file_name.endswith((".mp4", ".mov", ".m4v", ".webm"))
+        if is_video_doc:
+            video_ref = f"document:{m.document.file_id}"
+            should_copy_media = True
     elif m.text and ("http://" in m.text or "https://" in m.text):
         video_ref = m.text.strip()[:500]
     else:
         await m.answer(
-            "Жду видео файлом или ссылкой (Drive / Я.Диск / прямая https-ссылка). "
+            "Жду видео файлом или ссылкой (Drive / Я.Диск / YouTube / VK / Telegram / прямая https-ссылка). "
             "Если хочешь отменить — напиши /start."
         )
         return
@@ -348,7 +403,18 @@ async def on_test_video(m: Message, state: FSMContext) -> None:
         handle = f"@{username}" if username else f"id {m.from_user.id}"
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, f"📹 Пришло тестовое видео от {handle}\nref: {video_ref[:200]}")
+                note = (
+                    f"📹 Пришло тестовое видео от {handle}\n"
+                    f"Строка Sheets: {row_idx or 'не найдена'}\n"
+                    f"ref: {video_ref[:200]}"
+                )
+                await bot.send_message(admin_id, note)
+                if should_copy_media:
+                    await bot.copy_message(
+                        chat_id=admin_id,
+                        from_chat_id=m.chat.id,
+                        message_id=m.message_id,
+                    )
             except Exception:
                 log.exception("test_video: не смог отправить админу %s", admin_id)
     await state.clear()

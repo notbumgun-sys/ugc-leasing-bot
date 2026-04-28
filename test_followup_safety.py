@@ -23,6 +23,18 @@ class FakeBot:
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
 
 
+class FakeBriefMessage:
+    def __init__(self):
+        self.replies: list[str] = []
+        self.documents: list[dict] = []
+
+    async def reply(self, text, **kwargs):
+        self.replies.append(text)
+
+    async def answer_document(self, document, caption=None, **kwargs):
+        self.documents.append({"document": document, "caption": caption})
+
+
 def _install_fake_sheet(row: dict):
     def read_applications_with_index():
         return [(2, dict(row))]
@@ -93,10 +105,33 @@ def test_approve_button_uses_actual_delay():
         followup.FOLLOWUP_DELAY_SEC = old
 
 
+def test_candidate_brief_is_complete():
+    assert "700 ₽" in followup.TZ_TEXT
+    assert followup.SITE_URL in followup.TZ_TEXT
+    assert "файлом или ссылкой" in followup.TZ_TEXT
+    assert "не используем тест без вашего разрешения" in followup.TERMS_TEXT
+    assert followup.TZ_FILE_PATH.exists()
+
+    kb = followup._terms_kb(123)
+    assert kb.inline_keyboard[0][0].text == "✅ Ок, пришлите ТЗ"
+    assert kb.inline_keyboard[0][0].callback_data == "fu_u:ready:123"
+
+
+async def test_send_test_brief_sends_text_and_pdf():
+    message = FakeBriefMessage()
+    await followup._send_test_brief(message)
+    assert len(message.replies) == 1
+    assert "700 ₽" in message.replies[0]
+    assert len(message.documents) == 1
+    assert "Комикс-ТЗ" in message.documents[0]["caption"]
+
+
 async def main() -> int:
     await test_dry_run_is_at_most_once()
     await test_old_dry_run_row_never_goes_real()
     test_approve_button_uses_actual_delay()
+    test_candidate_brief_is_complete()
+    await test_send_test_brief_sends_text_and_pdf()
     print("ALL FOLLOWUP SAFETY TESTS PASSED")
     return 0
 
