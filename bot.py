@@ -27,7 +27,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from dotenv import load_dotenv
 
-from sheets import append_application, append_event, read_applications, read_events
+from sheets import append_application, append_event, read_applications, read_events, schema_check
+import followup
 
 # --- Конфиг -----------------------------------------------------------------
 
@@ -992,7 +993,7 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
     }
 
     try:
-        await asyncio.to_thread(append_application, payload)
+        row_idx = await asyncio.to_thread(append_application, payload)
     except Exception as e:
         log.exception("Ошибка записи в Google Sheets")
         await m.answer(
@@ -1011,6 +1012,10 @@ async def cmd_submit(m: Message, state: FSMContext, bot: Bot):
     await state.clear()
     _track(m, "submitted")
     await m.answer(THANKS, reply_markup=kb())
+
+    # Follow-up MVP: создаёт черновик и шлёт админу с кнопками.
+    # Не блокирует основной flow — все ошибки гасятся внутри.
+    asyncio.create_task(followup.on_application_submitted(bot, payload, row_idx))
 
     log.info("Новая заявка от @%s (id=%s)", payload["tg_username"], payload["tg_id"])
     tg_full = (payload["tg_first_name"] + " " + payload["tg_last_name"]).strip()
@@ -1093,9 +1098,21 @@ async def main() -> None:
     if not ADMIN_IDS:
         log.warning("ADMIN_IDS пуст — уведомления админам уходить не будут")
 
+    # Schema-check: гарантирует что в Sheets есть все колонки follow-up.
+    # _get_ws() сам апгрейдит шапку — этот вызов нужен чтобы упасть громко на старте,
+    # если Sheets недоступен или service account не имеет доступа к файлу.
+    try:
+        missing = await asyncio.to_thread(schema_check)
+        if missing:
+            raise RuntimeError(f"Sheets schema missing columns: {missing}")
+    except Exception:
+        log.exception("schema_check failed — Sheets недоступен или нет прав")
+        raise
+
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    dp.include_router(followup.router)
 
     # Render автоматически выставляет RENDER_EXTERNAL_URL для web services.
     # Если переменной нет (локально) — падаем в polling.
@@ -1103,6 +1120,7 @@ async def main() -> None:
     if not base_url:
         log.info("Локальный режим: long polling, админов: %s", len(ADMIN_IDS))
         await bot.delete_webhook(drop_pending_updates=True)
+        followup.start_scheduler(bot)
         await dp.start_polling(bot)
         return
 
@@ -1150,6 +1168,7 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    followup.start_scheduler(bot)
     await asyncio.Event().wait()
 
 

@@ -19,6 +19,15 @@ HEADERS = [
     "timestamp", "tg_id", "tg_username",
     "examples", "experience", "contact", "name",
     "tg_first_name", "tg_last_name",
+    # follow-up MVP (этап 1, без AI):
+    "followup_state",         # pending|approved|sending|sent|blocked|skipped
+    "followup_draft",         # сгенерированный текст follow-up
+    "followup_send_after",    # ISO-таймстемп когда можно слать
+    "followup_sent_at",       # ISO-таймстемп фактической отправки
+    "followup_error_reason",  # текст ошибки если followup_state=skipped по сбою
+    "dry_run_sent_at",        # ISO когда был dry-run прогон (followup_state не трогает)
+    "test_response",          # accepted|wants_terms|declined|submitted
+    "test_video_url",         # ссылка или telegram file_id
 ]
 
 EVENTS_WS_NAME = "Events"
@@ -66,23 +75,103 @@ def _get_ws():
     return ws
 
 
-def append_application(data: dict) -> None:
+def append_application(data: dict) -> int:
+    """Добавляет строку и возвращает её 1-based row index в листе."""
     ws = _get_ws()
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    ws.append_row(
-        [
-            ts,
-            str(data.get("tg_id", "")),
-            data.get("tg_username", ""),
-            data.get("examples", ""),
-            data.get("experience", ""),
-            data.get("contact", ""),
-            data.get("name", ""),
-            data.get("tg_first_name", ""),
-            data.get("tg_last_name", ""),
-        ],
-        value_input_option="USER_ENTERED",
-    )
+    row = [
+        ts,
+        str(data.get("tg_id", "")),
+        data.get("tg_username", ""),
+        data.get("examples", ""),
+        data.get("experience", ""),
+        data.get("contact", ""),
+        data.get("name", ""),
+        data.get("tg_first_name", ""),
+        data.get("tg_last_name", ""),
+    ]
+    # Дополним пустыми ячейками под follow-up колонки, чтобы шапка матчилась.
+    row += [""] * (len(HEADERS) - len(row))
+    # Передаём начальные значения follow-up если их прокинули в data.
+    for i, col in enumerate(HEADERS):
+        if col in data and data[col] != "" and not row[i]:
+            row[i] = data[col]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    # row_count даёт индекс последней строки (включая шапку).
+    return ws.row_count
+
+
+def update_application_fields(row_idx: int, fields: dict) -> None:
+    """Обновляет конкретные ячейки строки. row_idx — 1-based (как в Sheets)."""
+    ws = _get_ws()
+    if row_idx <= 1:
+        raise ValueError(f"row_idx={row_idx}: нельзя писать в шапку")
+    updates = []
+    for col_name, value in fields.items():
+        if col_name not in HEADERS:
+            raise ValueError(f"unknown column: {col_name}")
+        col_idx = HEADERS.index(col_name) + 1  # 1-based
+        a1 = gspread.utils.rowcol_to_a1(row_idx, col_idx)
+        updates.append({"range": a1, "values": [[str(value)]]})
+    if updates:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+
+
+def find_application_row(tg_id: int | str) -> int | None:
+    """Ищет последнюю по времени строку юзера. 1-based row idx или None."""
+    ws = _get_ws()
+    rows = ws.get_all_values()
+    if not rows:
+        return None
+    headers = rows[0]
+    try:
+        col_tg = headers.index("tg_id")
+    except ValueError:
+        return None
+    target = str(tg_id)
+    # Идём с конца — самая свежая запись юзера.
+    for i in range(len(rows) - 1, 0, -1):
+        if rows[i][col_tg] == target:
+            return i + 1  # 1-based
+    return None
+
+
+def has_active_followup(tg_id: int | str) -> bool:
+    """True если у tg_id есть строка с непустым followup_state (любой статус
+    кроме пустого) — чтобы не плодить дубли follow-up при повторной заявке."""
+    ws = _get_ws()
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return False
+    headers = rows[0]
+    try:
+        col_tg = headers.index("tg_id")
+        col_state = headers.index("followup_state")
+    except ValueError:
+        return False
+    target = str(tg_id)
+    for r in rows[1:]:
+        if len(r) <= max(col_tg, col_state):
+            continue
+        if r[col_tg] == target and r[col_state].strip():
+            return True
+    return False
+
+
+def read_applications_with_index() -> list[tuple[int, dict]]:
+    """Возвращает [(row_idx, record_dict), ...]. row_idx — 1-based."""
+    ws = _get_ws()
+    records = ws.get_all_records()
+    # get_all_records пропускает шапку, индексация с 0 → реальный row_idx = i+2
+    return [(i + 2, rec) for i, rec in enumerate(records)]
+
+
+def schema_check() -> list[str]:
+    """Проверяет, что в листе есть все ожидаемые колонки. Возвращает список
+    отсутствующих (если пусто — всё ок). Для вызова на старте бота."""
+    ws = _get_ws()  # _get_ws сам апгрейдит шапку, так что после вызова всё ок.
+    actual = ws.row_values(1)
+    return [h for h in HEADERS if h not in actual]
 
 
 def _get_events_ws():
