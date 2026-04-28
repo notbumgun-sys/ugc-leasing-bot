@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 import gspread
@@ -75,8 +76,20 @@ def _get_ws():
     return ws
 
 
+_RANGE_ROW_RE = re.compile(r"![A-Z]+(\d+)")
+
+
+def _ensure_grid_rows(ws, target_row: int) -> None:
+    """Если grid меньше target_row — расширяем с запасом. Грид не уменьшаем."""
+    if ws.row_count >= target_row:
+        return
+    new_rows = max(target_row + 200, ws.row_count + 200)
+    ws.resize(rows=new_rows)
+
+
 def append_application(data: dict) -> int:
-    """Добавляет строку и возвращает её 1-based row index в листе."""
+    """Добавляет строку и возвращает её 1-based row index, точно как Sheets API
+    его положил (парсим из updatedRange ответа values:append)."""
     ws = _get_ws()
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row = [
@@ -96,9 +109,20 @@ def append_application(data: dict) -> int:
     for i, col in enumerate(HEADERS):
         if col in data and data[col] != "" and not row[i]:
             row[i] = data[col]
-    ws.append_row(row, value_input_option="USER_ENTERED")
-    # row_count даёт индекс последней строки (включая шапку).
-    return ws.row_count
+    # Заранее даём grid'у запас, чтобы append не упёрся в лимит.
+    populated = len(ws.get_all_values())
+    _ensure_grid_rows(ws, populated + 2)
+    res = ws.append_row(
+        row,
+        value_input_option="USER_ENTERED",
+        insert_data_option="INSERT_ROWS",
+    )
+    updated_range = (res or {}).get("updates", {}).get("updatedRange", "")
+    m = _RANGE_ROW_RE.search(updated_range)
+    if not m:
+        # Фолбэк — посчитаем populated rows. Менее надёжно, но не упадём.
+        return len(ws.get_all_values())
+    return int(m.group(1))
 
 
 def update_application_fields(row_idx: int, fields: dict) -> None:
@@ -106,6 +130,9 @@ def update_application_fields(row_idx: int, fields: dict) -> None:
     ws = _get_ws()
     if row_idx <= 1:
         raise ValueError(f"row_idx={row_idx}: нельзя писать в шапку")
+    # Если grid не дотягивает до этой строки — расширяем. Иначе Sheets API вернёт
+    # "Range exceeds grid limits".
+    _ensure_grid_rows(ws, row_idx)
     updates = []
     for col_name, value in fields.items():
         if col_name not in HEADERS:
