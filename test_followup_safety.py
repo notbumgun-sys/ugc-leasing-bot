@@ -116,6 +116,12 @@ def test_approve_button_uses_actual_delay():
 
 
 def test_candidate_brief_is_complete():
+    draft = followup.build_draft("Николай", "https://example.com", "снимаю разное")
+    assert "Николай, привет!" in draft
+    assert "700 ₽" in draft
+    assert "посмотрели" not in draft.lower()
+    assert "по заявке видно" not in draft.lower()
+
     assert "700 ₽" in followup.TZ_TEXT
     assert followup.SITE_URL in followup.TZ_TEXT
     assert "файлом или ссылкой" in followup.TZ_TEXT
