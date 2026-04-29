@@ -109,8 +109,10 @@ def test_approve_button_uses_actual_delay():
     old = followup.FOLLOWUP_DELAY_SEC
     try:
         followup.FOLLOWUP_DELAY_SEC = 60
-        kb = followup._admin_kb(123)
+        kb = followup._admin_kb(123, row_idx=45)
         assert kb.inline_keyboard[0][0].text == "✅ Одобрить +1мин"
+        assert kb.inline_keyboard[0][0].callback_data == "fu2:approve:45:123"
+        assert kb.inline_keyboard[0][1].callback_data == "fu2:skip:45:123"
     finally:
         followup.FOLLOWUP_DELAY_SEC = old
 

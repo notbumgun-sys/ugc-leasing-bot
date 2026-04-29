@@ -183,13 +183,19 @@ def _format_send_after_msk(dt_utc: datetime) -> str:
     return dt_utc.astimezone(WORK_TZ).strftime("%d.%m %H:%M МСК")
 
 
-def _admin_kb(tg_id: int) -> InlineKeyboardMarkup:
+def _admin_kb(tg_id: int, row_idx: int | None = None) -> InlineKeyboardMarkup:
+    if row_idx is not None:
+        approve_cb = f"fu2:approve:{row_idx}:{tg_id}"
+        skip_cb = f"fu2:skip:{row_idx}:{tg_id}"
+    else:
+        approve_cb = f"fu:approve:{tg_id}"
+        skip_cb = f"fu:skip:{tg_id}"
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text=f"✅ Одобрить +{_delay_label(FOLLOWUP_DELAY_SEC)}",
-            callback_data=f"fu:approve:{tg_id}",
+            callback_data=approve_cb,
         ),
-        InlineKeyboardButton(text="❌ Пропустить", callback_data=f"fu:skip:{tg_id}"),
+        InlineKeyboardButton(text="❌ Пропустить", callback_data=skip_cb),
     ]])
 
 
@@ -246,12 +252,13 @@ async def on_application_submitted(bot: Bot, payload: dict, row_idx: int) -> Non
         handle = f"@{username}" if username else f"id {tg_id}"
         admin_text = (
             "🆕 Follow-up черновик\n"
+            f"Строка Sheets: {row_idx}\n"
             f"Кандидат: {handle}\n"
             f"Имя: {payload.get('name', '—')}\n\n"
             "— Текст черновика —\n"
             f"{draft}"
         )
-        kb = _admin_kb(tg_id)
+        kb = _admin_kb(tg_id, row_idx)
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(admin_id, admin_text, reply_markup=kb)
@@ -265,8 +272,25 @@ async def on_application_submitted(bot: Bot, payload: dict, row_idx: int) -> Non
 
 @router.callback_query(F.data.startswith("fu:approve:"))
 async def cb_admin_approve(cq: CallbackQuery) -> None:
-    tg_id = int(cq.data.split(":")[2])
-    row_idx = await asyncio.to_thread(find_application_row, tg_id)
+    await cq.answer(
+        "Это старая карточка с прежним текстом. Используйте новую карточку без зацепки.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("fu:skip:"))
+async def cb_admin_skip_old(cq: CallbackQuery) -> None:
+    await cq.answer(
+        "Это старая карточка с прежним текстом. Используйте новую карточку без зацепки.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("fu2:approve:"))
+async def cb_admin_approve_v2(cq: CallbackQuery) -> None:
+    parts = cq.data.split(":")
+    row_idx = int(parts[2])
+    tg_id = int(parts[3])
     if not row_idx:
         await cq.answer("Не нашёл строку в Sheets", show_alert=True)
         return
@@ -274,6 +298,9 @@ async def cb_admin_approve(cq: CallbackQuery) -> None:
     rec = next((r for ri, r in rows if ri == row_idx), None)
     if rec is None:
         await cq.answer("Строка не найдена", show_alert=True)
+        return
+    if str(rec.get("tg_id", "")).strip() != str(tg_id):
+        await cq.answer("tg_id в карточке не совпадает со строкой", show_alert=True)
         return
     cur_state = str(rec.get("followup_state", "")).strip()
     # Идемпотентность: если уже approved/sending/sent — игнор.
@@ -300,12 +327,21 @@ async def cb_admin_approve(cq: CallbackQuery) -> None:
             pass
 
 
-@router.callback_query(F.data.startswith("fu:skip:"))
+@router.callback_query(F.data.startswith("fu2:skip:"))
 async def cb_admin_skip(cq: CallbackQuery) -> None:
-    tg_id = int(cq.data.split(":")[2])
-    row_idx = await asyncio.to_thread(find_application_row, tg_id)
+    parts = cq.data.split(":")
+    row_idx = int(parts[2])
+    tg_id = int(parts[3])
     if not row_idx:
         await cq.answer("Не нашёл строку", show_alert=True)
+        return
+    rows = await asyncio.to_thread(read_applications_with_index)
+    rec = next((r for ri, r in rows if ri == row_idx), None)
+    if rec is None:
+        await cq.answer("Строка не найдена", show_alert=True)
+        return
+    if str(rec.get("tg_id", "")).strip() != str(tg_id):
+        await cq.answer("tg_id в карточке не совпадает со строкой", show_alert=True)
         return
     await asyncio.to_thread(
         update_application_fields,
